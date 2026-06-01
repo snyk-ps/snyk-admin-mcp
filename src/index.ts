@@ -440,10 +440,18 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: "snyk_list_orgs",
-      description: "List organizations accessible to the token (REST API). Read-only, no approval needed.",
+      description: "List organizations accessible to the token (REST API). Read-only. Supports cursor pagination and filters. Returns a `links.next` cursor for the next page.",
       inputSchema: {
         type: "object",
-        properties: {},
+        properties: {
+          limit: { type: "number", description: "Number of results per page (API default: 10)" },
+          starting_after: { type: "string", description: "Return results after this cursor (from links.next of a previous response)" },
+          ending_before: { type: "string", description: "Return results before this cursor (from links.prev of a previous response)" },
+          group_id: { type: "string", description: "Filter: only return orgs within this group" },
+          is_personal: { type: "boolean", description: "Filter: if true, only return orgs not part of any group" },
+          slug: { type: "string", description: "Filter: only return orgs whose slug exactly matches this value" },
+          name: { type: "string", description: "Filter: only return orgs whose name contains this value" },
+        },
       },
     },
     {
@@ -886,15 +894,42 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
   try {
     const config = getConfig();
     if (name === "snyk_list_orgs") {
-      const data = await rest.listOrgs(config);
+      const a = args as {
+        limit?: number; starting_after?: string; ending_before?: string;
+        group_id?: string; is_personal?: boolean; slug?: string; name?: string;
+      } ?? {};
+      const data = await rest.listOrgs(config, {
+        limit: a.limit,
+        starting_after: a.starting_after,
+        ending_before: a.ending_before,
+        group_id: a.group_id,
+        is_personal: a.is_personal,
+        slug: a.slug,
+        name: a.name,
+      });
       const lines = (data.data ?? []).map((org) => {
-        const name = org.attributes?.name ?? "—";
-        return `${name} (${org.id})`;
+        const orgName = org.attributes?.name ?? "—";
+        return `${orgName} (${org.id})`;
       });
       const summary = lines.length ? lines.join("\n") : "No organizations.";
-      const full = { data: data.data?.map((org) => ({ id: org.id, name: org.attributes?.name ?? null, group_id: org.attributes?.group_id ?? null })) };
+      const full = {
+        data: data.data?.map((org) => ({
+          id: org.id,
+          name: org.attributes?.name ?? null,
+          slug: org.attributes?.slug ?? null,
+          group_id: org.attributes?.group_id ?? null,
+        })),
+        pagination: {
+          next: data.links?.next ?? null,
+          prev: data.links?.prev ?? null,
+          count: data.meta?.count ?? null,
+        },
+      };
+      const nextHint = data.links?.next
+        ? `\n\nNext page cursor: pass starting_after="${data.links.next}" to get the next page.`
+        : "";
       return {
-        content: [{ type: "text", text: `${summary}\n\nFull data:\n${JSON.stringify(full, null, 2)}` }],
+        content: [{ type: "text", text: `${summary}${nextHint}\n\nFull data:\n${JSON.stringify(full, null, 2)}` }],
         isError: false,
       };
     }

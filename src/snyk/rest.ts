@@ -30,10 +30,36 @@ export async function restFetch(
   );
 }
 
-export async function listOrgs(config: SnykApiConfig): Promise<{ data: { id: string; attributes?: { name?: string; group_id?: string } }[] }> {
-  const res = await restFetch(config, "/orgs");
+export type ListOrgsResponse = {
+  data: { id: string; attributes?: { name?: string; group_id?: string; slug?: string } }[];
+  links?: { next?: string; prev?: string; first?: string; last?: string };
+  meta?: { count?: number };
+};
+
+export async function listOrgs(
+  config: SnykApiConfig,
+  opts: {
+    limit?: number;
+    starting_after?: string;
+    ending_before?: string;
+    group_id?: string;
+    is_personal?: boolean;
+    slug?: string;
+    name?: string;
+  } = {}
+): Promise<ListOrgsResponse> {
+  const qs = buildQuery({
+    limit: opts.limit,
+    starting_after: opts.starting_after,
+    ending_before: opts.ending_before,
+    group_id: opts.group_id,
+    is_personal: opts.is_personal === undefined ? undefined : String(opts.is_personal),
+    slug: opts.slug,
+    name: opts.name,
+  });
+  const res = await restFetch(config, `/orgs${qs}`);
   if (!res.ok) throw new Error(`REST listOrgs failed: ${res.status} ${await res.text()}`);
-  return res.json() as Promise<{ data: { id: string; attributes?: { name?: string; group_id?: string } }[] }>;
+  return res.json() as Promise<ListOrgsResponse>;
 }
 
 /** Get the group_id from the first org the token can access (for accounts that require group_id to create orgs). */

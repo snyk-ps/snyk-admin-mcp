@@ -89,7 +89,7 @@ Replace `/ABSOLUTE/PATH/TO/snyk-admin-mcp` with the real path to this repo (e.g.
 
 | Tool | Description |
 |------|-------------|
-| `snyk_list_orgs` | List organizations (REST). Read-only. |
+| `snyk_list_orgs` | List organizations (REST). Read-only. Supports cursor pagination (`limit`, `starting_after`, `ending_before`) and filters (`group_id`, `is_personal`, `slug`, `name`). |
 | `snyk_list_integrations` | List integrations for an org (V1). Read-only. |
 | `snyk_list_projects` | List projects for an org (REST). Read-only. |
 | `snyk_create_organization` | Create a new Snyk organization (V1). Optional: `group_id`, `source_org_id` (copy settings from template). Dry run / approval flow. |
@@ -116,6 +116,19 @@ Replace `/ABSOLUTE/PATH/TO/snyk-admin-mcp` with the real path to this repo (e.g.
 | `snyk_get_inventory_asset_filter_values` | Autocomplete filter values for a filter field (REST Inventory Assets API). Read-only. |
 | `snyk_list_inventory_asset_groups` | List available group fields for inventory assets (REST Inventory Assets API). Read-only. |
 | `snyk_get_inventory_asset_group_values` | Aggregate group values for a group field (REST Inventory Assets API). Read-only. |
+
+## V1 org API notes
+
+The following tools use Snyk's **V1 API** (`/v1/org/...`), which predates the REST API. Keep these limitations in mind:
+
+- **Authentication** – Same token as the REST API. The token must have org-admin (or group-admin) permissions for the target org.
+- **`snyk_create_organization`** – Creates an org under a group. `group_id` is required for Enterprise/group accounts; omitting it places the org under a personal account. Pass `source_org_id` to copy settings (integrations, notification preferences) from an existing template org.
+- **`snyk_copy_org_settings`** – Only fields editable via `PUT /v1/org/{orgId}/settings` are copied (e.g. `requestAccess`). Settings managed elsewhere (integrations, SCM tokens, SSO) are not affected.
+- **`snyk_clone_integration`** – Clones an integration's settings and credentials from one org to another using `POST /v1/org/{sourceOrgId}/integrations/{integrationId}/clone`. CLI integrations are not clonable and will be rejected. Credentials must already exist in the source org; this call duplicates the configuration, not re-authenticates.
+- **`snyk_bulk_asset_labels`** – Adds project tags (called "labels" here, "tags" in V1) via `POST /v1/org/{orgId}/project/{projectId}/tags`. Tags are additive; existing tags are not removed. Use `snyk_list_projects` to retrieve project IDs first.
+- **`snyk_list_integrations`** – Returns a map of `{ integrationType: integrationId }` via `GET /v1/org/{orgId}/integrations`.
+- **Rate limit** – The V1 API allows up to 2 000 requests/minute. The server uses a 1 800/min sliding-window limiter (~90 %) with automatic retry on 429.
+- **Deprecation** – Snyk is gradually migrating V1 endpoints to the REST API. Check the [Snyk API changelog](https://docs.snyk.io/developer-tools/snyk-api/api-changelog) for any endpoints that have been promoted to GA REST before relying on V1 long-term.
 
 ## Asset API notes
 
