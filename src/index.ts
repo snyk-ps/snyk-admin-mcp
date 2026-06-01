@@ -121,6 +121,9 @@ const AssetSearchAttributesSchema: z.ZodType<AssetSearchAttributesInput> = z.laz
 const SearchAssetsArgsSchema = z.object({
   group_id: z.string().describe("Group ID to search assets in"),
   query: z.object({ attributes: AssetSearchAttributesSchema }).optional().describe("Optional filter. Omit to list all assets."),
+  limit: z.number().optional().describe("Records to return (10-100)"),
+  starting_after: z.string().optional().describe("Cursor: return records after this cursor"),
+  ending_before: z.string().optional().describe("Cursor: return records before this cursor"),
 });
 
 const GetAssetArgsSchema = z.object({
@@ -330,7 +333,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: "snyk_search_assets",
-      description: "Search assets in a group using the Asset API (REST, Early Access). POST /groups/{group_id}/assets/search. Read-only. Provide an optional filter query, or omit it to list all assets.",
+      description: "Search assets in a group using the Asset API (REST, Early Access). POST /groups/{group_id}/assets/search. Read-only. Provide an optional filter query, or omit it to list all assets. Supports cursor pagination via limit/starting_after/ending_before.",
       inputSchema: {
         type: "object",
         properties: {
@@ -352,6 +355,9 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
             },
             required: ["attributes"],
           },
+          limit: { type: "number", description: "Records to return (10-100)" },
+          starting_after: { type: "string", description: "Cursor: return records after this cursor" },
+          ending_before: { type: "string", description: "Cursor: return records before this cursor" },
         },
         required: ["group_id"],
       },
@@ -556,7 +562,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
 
     if (name === "snyk_search_assets") {
       const parsed = SearchAssetsArgsSchema.parse(args);
-      const data = await rest.searchAssets(config, parsed.group_id, parsed.query);
+      const data = await rest.searchAssets(config, parsed.group_id, parsed.query, {
+        limit: parsed.limit,
+        starting_after: parsed.starting_after,
+        ending_before: parsed.ending_before,
+      });
       return {
         content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
         isError: false,

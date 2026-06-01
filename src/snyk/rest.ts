@@ -105,11 +105,13 @@ function buildQuery(params: Record<string, string | number | undefined>): string
 export async function searchAssets(
   config: SnykApiConfig,
   groupId: string,
-  query?: { attributes: AssetSearchAttributes }
+  query?: { attributes: AssetSearchAttributes },
+  page: { limit?: number; starting_after?: string; ending_before?: string } = {}
 ): Promise<Record<string, unknown>> {
   const safeGroupId = sanitizePathSegment(groupId, "group_id");
   const body = query ? { query } : {};
-  const res = await restFetch(config, `/groups/${safeGroupId}/assets/search`, {
+  const qs = buildQuery({ limit: page.limit, starting_after: page.starting_after, ending_before: page.ending_before });
+  const res = await restFetch(config, `/groups/${safeGroupId}/assets/search${qs}`, {
     method: "POST",
     body: JSON.stringify(body),
     version: ASSET_API_VERSION,
