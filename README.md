@@ -8,6 +8,7 @@ MCP server for managing the Snyk platform as a customer with group admin permiss
 - **Clone integration** – Clone an integration (with settings and credentials) from one org to another (V1 API).
 - **Bulk asset labels** – Add labels (project tags) to many projects in one go (V1 API).
 - **Asset API** – Search assets, look up an asset and its related projects/assets, update an asset's class/labels/tags, and manage repository aliases (REST API, Early Access).
+- **Inventory Assets API** – List/search inventory assets (sync + async), get/update a single asset, list its projects/targets, and discover filter/group fields, across tenant/org/group scope (REST API, Early Access).
 - **Dry run** – Every mutation tool supports `dry_run=true` (default) to return a plan only.
 - **User approval** – To apply changes, call the same tool with `dry_run=false` and the `approval_token` returned from the dry run. Tokens expire after 10 minutes.
 
@@ -24,6 +25,11 @@ MCP server for managing the Snyk platform as a customer with group admin permiss
 | Get asset / related projects / related assets | REST | `GET /groups/{group_id}/assets/{asset_id}` and `.../relationships/{projects,assets}` |
 | Update asset (class, labels, tags) | REST | `PATCH /groups/{group_id}/assets/{asset_id}` |
 | Repository aliases (list, add, remove) | REST | `GET/POST/DELETE /{groups\|orgs}/{id}/assets/repository/aliases` |
+| List/search inventory assets (sync) | REST | `GET /{tenants\|orgs\|groups}/{id}/inventory/assets` (RSQL `filter`) |
+| Get / update inventory asset | REST | `GET`/`PATCH .../inventory/assets/{asset_id}` |
+| Inventory asset projects / targets | REST | `GET .../inventory/assets/{asset_id}/relationships/{projects,targets}` |
+| Async inventory search | REST | `POST .../inventory/assets/searches`, `GET .../searches/{search_id}/results` |
+| Inventory filters / groups discovery | REST | `GET .../inventory/assets/{filters,groups}` and `.../{filter_id\|group_field_id}/values` |
 
 ## Setup
 
@@ -99,12 +105,32 @@ Replace `/ABSOLUTE/PATH/TO/snyk-admin-mcp` with the real path to this repo (e.g.
 | `snyk_list_repository_aliases` | List repository aliases for a group or org (REST Asset API). Read-only. |
 | `snyk_add_repository_alias` | Add repository aliases for a group or org (REST Asset API). Dry run / approval flow. |
 | `snyk_remove_repository_alias` | Remove repository aliases from a group or org (REST Asset API). Dry run / approval flow. |
+| `snyk_list_inventory_assets` | List/search inventory assets synchronously with an RSQL `filter` (REST Inventory Assets API). Read-only. |
+| `snyk_get_inventory_asset` | Get a single inventory asset by ID (REST Inventory Assets API). Read-only. |
+| `snyk_update_inventory_asset` | Update one inventory asset's class/labels/tags (REST Inventory Assets API). Dry run / approval flow. |
+| `snyk_list_inventory_asset_projects` | List projects for an inventory asset (REST Inventory Assets API). Read-only. |
+| `snyk_list_inventory_asset_targets` | List targets for an inventory asset (REST Inventory Assets API). Read-only. |
+| `snyk_create_inventory_asset_search` | Create an async inventory asset search; returns a `search_id` (REST Inventory Assets API). Read-only. |
+| `snyk_get_inventory_asset_search_results` | Fetch results for an async inventory search by `search_id` (REST Inventory Assets API). Read-only. |
+| `snyk_list_inventory_asset_filters` | List available filter fields for inventory assets (REST Inventory Assets API). Read-only. |
+| `snyk_get_inventory_asset_filter_values` | Autocomplete filter values for a filter field (REST Inventory Assets API). Read-only. |
+| `snyk_list_inventory_asset_groups` | List available group fields for inventory assets (REST Inventory Assets API). Read-only. |
+| `snyk_get_inventory_asset_group_values` | Aggregate group values for a group field (REST Inventory Assets API). Read-only. |
 
 ## Asset API notes
 
 - The Asset API is **group-scoped** for search, lookup, relationships, and updates: pass `group_id` (a group UUID), not an org ID.
 - Repository alias tools (`snyk_*_repository_alias`, `snyk_list_repository_aliases`) accept **either** `group_id` **or** `org_id` (exactly one).
 - Search supports nested filters: a single `{ attribute, operator, values }` node, or a logical `and`/`or` node whose `values` array contains nested filter nodes. Filterable attributes include `name`, `type`, `class`, `labels`, `tags.<key>`, `repository_url`, and others.
+- These endpoints are Early Access and use REST API `version=2026-03-25`.
+
+## Inventory Assets API notes
+
+- These tools accept **exactly one** scope: `tenant_id`, `org_id`, or `group_id`. The same `/inventory/assets/...` paths exist under all three scopes.
+- Filtering uses **RSQL** (e.g. `type==container_images;class==A`, `created_at=gt=2026-01-01`), passed via the `filter` parameter — different from the Asset API's nested JSON filters.
+- `snyk_create_inventory_asset_search` + `snyk_get_inventory_asset_search_results` implement the **asynchronous** search flow (create a search, then poll its results); `snyk_list_inventory_assets` is the synchronous variant.
+- `snyk_update_inventory_asset` currently targets the `container_images` resource type (the only type the PATCH endpoint accepts). `labels`/`tags` accept either `{ add, remove }` or `{ replace }`.
+- Sparse fieldsets are supported via the `fields` parameter (comma-separated `container_images` fields).
 - These endpoints are Early Access and use REST API `version=2026-03-25`.
 
 ## Workflow (mutations)

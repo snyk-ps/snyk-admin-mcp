@@ -209,6 +209,143 @@ function resolveAssetScope(groupId?: string, orgId?: string): { scope: "groups" 
   throw new Error("Provide group_id or org_id.");
 }
 
+// --- Inventory Assets API (Early Access): tenant/org/group scoped ---
+
+/** Resolve tenant/org/group scope for Inventory Assets endpoints (exactly one). */
+function resolveInventoryScope(tenantId?: string, orgId?: string, groupId?: string): { scope: rest.InventoryScope; id: string } {
+  const provided = [tenantId, orgId, groupId].filter((v) => v !== undefined && v !== "").length;
+  if (provided !== 1) throw new Error("Provide exactly one of tenant_id, org_id, or group_id.");
+  if (tenantId) return { scope: "tenants", id: tenantId };
+  if (orgId) return { scope: "orgs", id: orgId };
+  return { scope: "groups", id: groupId! };
+}
+
+/** Shared scope fields for inventory tools. */
+const InventoryScopeShape = {
+  tenant_id: z.string().optional().describe("Tenant ID (provide exactly one of tenant_id/org_id/group_id)"),
+  org_id: z.string().optional().describe("Org ID (provide exactly one of tenant_id/org_id/group_id)"),
+  group_id: z.string().optional().describe("Group ID (provide exactly one of tenant_id/org_id/group_id)"),
+};
+
+const ListInventoryAssetsArgsSchema = z.object({
+  ...InventoryScopeShape,
+  filter: z.string().optional().describe("RSQL filter expression (e.g. \"type==container_images;class==A\")"),
+  sort: z.string().optional().describe("Comma-separated sort fields; prefix with - for descending"),
+  fields: z.string().optional().describe("Comma-separated container_images fields to return (sparse fieldset)"),
+  meta_count: z.enum(["with", "only"]).optional(),
+  limit: z.number().int().min(10).max(100).optional(),
+  starting_after: z.string().optional(),
+  ending_before: z.string().optional(),
+});
+
+const GetInventoryAssetArgsSchema = z.object({
+  ...InventoryScopeShape,
+  asset_id: z.string().describe("Inventory asset ID (UUID)"),
+  fields: z.string().optional().describe("Comma-separated container_images fields to return (sparse fieldset)"),
+});
+
+const InventoryAssetClassSchema = z.object({
+  display_name: z.enum(["A", "B", "C", "D"]).optional(),
+  rank: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4)]).optional(),
+  locked: z.boolean().optional(),
+});
+const InventoryLabelsSchema = z.union([
+  z.object({ add: z.array(z.string()).optional(), remove: z.array(z.string()).optional() }),
+  z.object({ replace: z.array(z.string()) }),
+]);
+const InventoryTagsSchema = z.union([
+  z.object({ add: z.record(z.string(), z.string()).optional(), remove: z.array(z.string()).optional() }),
+  z.object({ replace: z.record(z.string(), z.string()) }),
+]);
+
+const UpdateInventoryAssetArgsSchema = z.object({
+  ...InventoryScopeShape,
+  asset_id: z.string().describe("Inventory asset ID (UUID)"),
+  type: z.string().default("container_images").describe("JSON:API resource type (currently container_images)"),
+  class: InventoryAssetClassSchema.optional(),
+  labels: InventoryLabelsSchema.optional(),
+  tags: InventoryTagsSchema.optional(),
+  dry_run: z.boolean().default(true),
+  approval_token: z.string().optional(),
+});
+
+const ListInventoryAssetProjectsArgsSchema = z.object({
+  ...InventoryScopeShape,
+  asset_id: z.string(),
+  canonical: z.enum(["with", "only", "none"]).optional(),
+  target_id: z.string().optional(),
+  sort: z.string().optional(),
+  limit: z.number().int().min(10).max(100).optional(),
+  starting_after: z.string().optional(),
+  ending_before: z.string().optional(),
+});
+
+const ListInventoryAssetTargetsArgsSchema = z.object({
+  ...InventoryScopeShape,
+  asset_id: z.string(),
+  limit: z.number().int().min(10).max(100).optional(),
+  starting_after: z.string().optional(),
+  ending_before: z.string().optional(),
+});
+
+const CreateInventoryAssetSearchArgsSchema = z.object({
+  ...InventoryScopeShape,
+  filter: z.string().optional().describe("RSQL filter expression"),
+  sort: z.string().optional(),
+  meta_count: z.enum(["with", "only"]).optional(),
+  limit: z.number().int().min(10).max(100).optional(),
+});
+
+const GetInventoryAssetSearchResultsArgsSchema = z.object({
+  ...InventoryScopeShape,
+  search_id: z.string().describe("Search ID returned by snyk_create_inventory_asset_search"),
+  sort: z.string().optional(),
+  fields: z.string().optional(),
+  limit: z.number().int().min(10).max(100).optional(),
+  starting_after: z.string().optional(),
+  ending_before: z.string().optional(),
+});
+
+const ListInventoryAssetFiltersArgsSchema = z.object({
+  ...InventoryScopeShape,
+  asset_types: z.string().optional().describe("Comma-separated asset types to scope filters to"),
+  limit: z.number().int().min(10).max(100).optional(),
+  starting_after: z.string().optional(),
+  ending_before: z.string().optional(),
+});
+
+const GetInventoryAssetFilterValuesArgsSchema = z.object({
+  ...InventoryScopeShape,
+  filter_id: z.string().describe("Filter field ID (e.g. class, tags.environment)"),
+  q: z.string().optional().describe("Autocomplete query string"),
+  key: z.string().optional(),
+  keys_only: z.boolean().optional(),
+  limit: z.number().int().min(10).max(100).optional(),
+  starting_after: z.string().optional(),
+  ending_before: z.string().optional(),
+});
+
+const ListInventoryAssetGroupsArgsSchema = z.object({
+  ...InventoryScopeShape,
+  asset_types: z.string().optional(),
+  limit: z.number().int().min(10).max(100).optional(),
+  starting_after: z.string().optional(),
+  ending_before: z.string().optional(),
+});
+
+const GetInventoryAssetGroupValuesArgsSchema = z.object({
+  ...InventoryScopeShape,
+  group_field_id: z.string().describe("Group field ID to aggregate on"),
+  asset_types: z.string().optional(),
+  filter: z.string().optional().describe("RSQL filter to restrict aggregated assets"),
+  sort: z.string().optional(),
+  meta_fields: z.string().optional().describe("Comma-separated meta fields (e.g. count,last_seen_at)"),
+  aggregate: z.string().optional().describe("Per-field aggregate override"),
+  limit: z.number().int().min(10).max(100).optional(),
+  starting_after: z.string().optional(),
+  ending_before: z.string().optional(),
+});
+
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     {
@@ -515,6 +652,230 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
           approval_token: { type: "string" },
         },
         required: ["aliases"],
+      },
+    },
+    {
+      name: "snyk_list_inventory_assets",
+      description: "List or search inventory assets synchronously (REST Inventory Assets API, Early Access). GET /{tenants|orgs|groups}/{id}/inventory/assets. Read-only. Provide exactly one of tenant_id/org_id/group_id. Supports an RSQL `filter`.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          tenant_id: { type: "string", description: "Tenant ID (provide exactly one scope)" },
+          org_id: { type: "string", description: "Org ID (provide exactly one scope)" },
+          group_id: { type: "string", description: "Group ID (provide exactly one scope)" },
+          filter: { type: "string", description: "RSQL filter expression, e.g. \"type==container_images;class==A\"" },
+          sort: { type: "string", description: "Comma-separated sort fields; prefix - for descending" },
+          fields: { type: "string", description: "Comma-separated container_images fields (sparse fieldset)" },
+          meta_count: { type: "string", enum: ["with", "only"] },
+          limit: { type: "number", description: "Records to return (10-100)" },
+          starting_after: { type: "string" },
+          ending_before: { type: "string" },
+        },
+      },
+    },
+    {
+      name: "snyk_get_inventory_asset",
+      description: "Get a single inventory asset by ID (REST Inventory Assets API, Early Access). GET /{tenants|orgs|groups}/{id}/inventory/assets/{asset_id}. Read-only.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          tenant_id: { type: "string" },
+          org_id: { type: "string" },
+          group_id: { type: "string" },
+          asset_id: { type: "string", description: "Inventory asset ID (UUID)" },
+          fields: { type: "string", description: "Comma-separated container_images fields (sparse fieldset)" },
+        },
+        required: ["asset_id"],
+      },
+    },
+    {
+      name: "snyk_update_inventory_asset",
+      description: "Update a single inventory asset's class, labels, and/or tags (REST Inventory Assets API, Early Access). PATCH /{tenants|orgs|groups}/{id}/inventory/assets/{asset_id}. Use dry_run=true first, then dry_run=false with approval_token to apply.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          tenant_id: { type: "string" },
+          org_id: { type: "string" },
+          group_id: { type: "string" },
+          asset_id: { type: "string", description: "Inventory asset ID (UUID)" },
+          type: { type: "string", description: "JSON:API resource type (currently container_images)", default: "container_images" },
+          class: {
+            type: "object",
+            properties: {
+              display_name: { type: "string", enum: ["A", "B", "C", "D"] },
+              rank: { type: "number", enum: [1, 2, 3, 4] },
+              locked: { type: "boolean" },
+            },
+            description: "Set asset class by display_name (A-D) or rank (1-4)",
+          },
+          labels: {
+            type: "object",
+            description: "Labels: either {add,remove} or {replace}",
+            properties: {
+              add: { type: "array", items: { type: "string" } },
+              remove: { type: "array", items: { type: "string" } },
+              replace: { type: "array", items: { type: "string" } },
+            },
+          },
+          tags: {
+            type: "object",
+            description: "Tags: either {add,remove} or {replace}",
+            properties: {
+              add: { type: "object", additionalProperties: { type: "string" } },
+              remove: { type: "array", items: { type: "string" } },
+              replace: { type: "object", additionalProperties: { type: "string" } },
+            },
+          },
+          dry_run: { type: "boolean", default: true },
+          approval_token: { type: "string" },
+        },
+        required: ["asset_id"],
+      },
+    },
+    {
+      name: "snyk_list_inventory_asset_projects",
+      description: "List projects for an inventory asset (REST Inventory Assets API, Early Access). GET .../inventory/assets/{asset_id}/relationships/projects. Read-only.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          tenant_id: { type: "string" },
+          org_id: { type: "string" },
+          group_id: { type: "string" },
+          asset_id: { type: "string" },
+          canonical: { type: "string", enum: ["with", "only", "none"] },
+          target_id: { type: "string" },
+          sort: { type: "string" },
+          limit: { type: "number", description: "Records to return (10-100)" },
+          starting_after: { type: "string" },
+          ending_before: { type: "string" },
+        },
+        required: ["asset_id"],
+      },
+    },
+    {
+      name: "snyk_list_inventory_asset_targets",
+      description: "List targets for an inventory asset (REST Inventory Assets API, Early Access). GET .../inventory/assets/{asset_id}/relationships/targets. Read-only.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          tenant_id: { type: "string" },
+          org_id: { type: "string" },
+          group_id: { type: "string" },
+          asset_id: { type: "string" },
+          limit: { type: "number", description: "Records to return (10-100)" },
+          starting_after: { type: "string" },
+          ending_before: { type: "string" },
+        },
+        required: ["asset_id"],
+      },
+    },
+    {
+      name: "snyk_create_inventory_asset_search",
+      description: "Create an asynchronous inventory asset search (REST Inventory Assets API, Early Access). POST .../inventory/assets/searches. Returns a search id; fetch results with snyk_get_inventory_asset_search_results. Read-only (no asset changes).",
+      inputSchema: {
+        type: "object",
+        properties: {
+          tenant_id: { type: "string" },
+          org_id: { type: "string" },
+          group_id: { type: "string" },
+          filter: { type: "string", description: "RSQL filter expression" },
+          sort: { type: "string" },
+          meta_count: { type: "string", enum: ["with", "only"] },
+          limit: { type: "number", description: "Results per page (10-100)" },
+        },
+      },
+    },
+    {
+      name: "snyk_get_inventory_asset_search_results",
+      description: "Retrieve asynchronous inventory asset search results (REST Inventory Assets API, Early Access). GET .../inventory/assets/searches/{search_id}/results. Read-only.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          tenant_id: { type: "string" },
+          org_id: { type: "string" },
+          group_id: { type: "string" },
+          search_id: { type: "string", description: "Search ID from snyk_create_inventory_asset_search" },
+          sort: { type: "string" },
+          fields: { type: "string", description: "Comma-separated container_images fields (sparse fieldset)" },
+          limit: { type: "number", description: "Records to return (10-100)" },
+          starting_after: { type: "string" },
+          ending_before: { type: "string" },
+        },
+        required: ["search_id"],
+      },
+    },
+    {
+      name: "snyk_list_inventory_asset_filters",
+      description: "Get available filter fields for inventory assets (REST Inventory Assets API, Early Access). GET .../inventory/assets/filters. Read-only.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          tenant_id: { type: "string" },
+          org_id: { type: "string" },
+          group_id: { type: "string" },
+          asset_types: { type: "string", description: "Comma-separated asset types to scope filters to" },
+          limit: { type: "number", description: "Records to return (10-100)" },
+          starting_after: { type: "string" },
+          ending_before: { type: "string" },
+        },
+      },
+    },
+    {
+      name: "snyk_get_inventory_asset_filter_values",
+      description: "Get filter value suggestions (autocomplete) for a filter field (REST Inventory Assets API, Early Access). GET .../inventory/assets/filters/{filter_id}/values. Read-only.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          tenant_id: { type: "string" },
+          org_id: { type: "string" },
+          group_id: { type: "string" },
+          filter_id: { type: "string", description: "Filter field ID (e.g. class, tags.environment)" },
+          q: { type: "string", description: "Autocomplete query string" },
+          key: { type: "string" },
+          keys_only: { type: "boolean" },
+          limit: { type: "number", description: "Records to return (10-100)" },
+          starting_after: { type: "string" },
+          ending_before: { type: "string" },
+        },
+        required: ["filter_id"],
+      },
+    },
+    {
+      name: "snyk_list_inventory_asset_groups",
+      description: "Get available group fields for inventory assets (REST Inventory Assets API, Early Access). GET .../inventory/assets/groups. Read-only.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          tenant_id: { type: "string" },
+          org_id: { type: "string" },
+          group_id: { type: "string" },
+          asset_types: { type: "string" },
+          limit: { type: "number", description: "Records to return (10-100)" },
+          starting_after: { type: "string" },
+          ending_before: { type: "string" },
+        },
+      },
+    },
+    {
+      name: "snyk_get_inventory_asset_group_values",
+      description: "Get group value aggregation for a group field (REST Inventory Assets API, Early Access). GET .../inventory/assets/groups/{group_field_id}/values. Read-only.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          tenant_id: { type: "string" },
+          org_id: { type: "string" },
+          group_id: { type: "string" },
+          group_field_id: { type: "string", description: "Group field ID to aggregate on" },
+          asset_types: { type: "string" },
+          filter: { type: "string", description: "RSQL filter to restrict aggregated assets" },
+          sort: { type: "string" },
+          meta_fields: { type: "string", description: "Comma-separated meta fields (e.g. count,last_seen_at)" },
+          aggregate: { type: "string", description: "Per-field aggregate override" },
+          limit: { type: "number", description: "Records to return (10-100)" },
+          starting_after: { type: "string" },
+          ending_before: { type: "string" },
+        },
+        required: ["group_field_id"],
       },
     },
   ],
@@ -960,6 +1321,172 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         content: [{ type: "text", text: `Removed ${p.aliases.length} repository alias(es) from ${p.scope} ${p.scope_id}.\n\nResult: ${JSON.stringify(result, null, 2)}` }],
         isError: false,
       };
+    }
+
+    if (name === "snyk_list_inventory_assets") {
+      const parsed = ListInventoryAssetsArgsSchema.parse(args);
+      const { scope, id } = resolveInventoryScope(parsed.tenant_id, parsed.org_id, parsed.group_id);
+      const data = await rest.listInventoryAssets(config, scope, id, {
+        filter: parsed.filter,
+        sort: parsed.sort,
+        fields: parsed.fields,
+        meta_count: parsed.meta_count,
+        limit: parsed.limit,
+        starting_after: parsed.starting_after,
+        ending_before: parsed.ending_before,
+      });
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }], isError: false };
+    }
+
+    if (name === "snyk_get_inventory_asset") {
+      const parsed = GetInventoryAssetArgsSchema.parse(args);
+      const { scope, id } = resolveInventoryScope(parsed.tenant_id, parsed.org_id, parsed.group_id);
+      const data = await rest.getInventoryAsset(config, scope, id, parsed.asset_id, { fields: parsed.fields });
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }], isError: false };
+    }
+
+    if (name === "snyk_update_inventory_asset") {
+      const parsed = UpdateInventoryAssetArgsSchema.parse(args);
+      const { scope, id } = resolveInventoryScope(parsed.tenant_id, parsed.org_id, parsed.group_id);
+      const attributes: rest.InventoryAssetAttributes = {};
+      if (parsed.class !== undefined) attributes.class = parsed.class;
+      if (parsed.labels !== undefined) attributes.labels = parsed.labels;
+      if (parsed.tags !== undefined) attributes.tags = parsed.tags;
+      if (Object.keys(attributes).length === 0) {
+        return { content: [{ type: "text", text: "Provide at least one of: class, labels, or tags to update." }], isError: true };
+      }
+      if (parsed.dry_run) {
+        const plan = {
+          action: "update_inventory_asset",
+          scope,
+          scope_id: id,
+          asset_id: parsed.asset_id,
+          type: parsed.type,
+          attributes,
+        };
+        const approval_token = createApproval(plan);
+        return {
+          content: [{
+            type: "text",
+            text: `Dry run – will update inventory asset ${parsed.asset_id} in ${scope} ${id}.\n\nPlan:\n${JSON.stringify(plan, null, 2)}\n\nTo apply, call snyk_update_inventory_asset with dry_run=false and approval_token="${approval_token}"`,
+          }],
+          isError: false,
+        };
+      }
+      const plan = consumeApproval(parsed.approval_token ?? "");
+      if (!plan || (plan as { action?: string }).action !== "update_inventory_asset") {
+        return { content: [{ type: "text", text: "Invalid or expired approval_token. Run with dry_run=true first." }], isError: true };
+      }
+      const p = plan as { scope: rest.InventoryScope; scope_id: string; asset_id: string; type: string; attributes: rest.InventoryAssetAttributes };
+      const result = await rest.updateInventoryAsset(config, p.scope, p.scope_id, p.asset_id, p.type, p.attributes);
+      return {
+        content: [{ type: "text", text: `Inventory asset ${p.asset_id} updated.\n\nResult: ${JSON.stringify(result, null, 2)}` }],
+        isError: false,
+      };
+    }
+
+    if (name === "snyk_list_inventory_asset_projects") {
+      const parsed = ListInventoryAssetProjectsArgsSchema.parse(args);
+      const { scope, id } = resolveInventoryScope(parsed.tenant_id, parsed.org_id, parsed.group_id);
+      const data = await rest.listInventoryAssetProjects(config, scope, id, parsed.asset_id, {
+        canonical: parsed.canonical,
+        target_id: parsed.target_id,
+        sort: parsed.sort,
+        limit: parsed.limit,
+        starting_after: parsed.starting_after,
+        ending_before: parsed.ending_before,
+      });
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }], isError: false };
+    }
+
+    if (name === "snyk_list_inventory_asset_targets") {
+      const parsed = ListInventoryAssetTargetsArgsSchema.parse(args);
+      const { scope, id } = resolveInventoryScope(parsed.tenant_id, parsed.org_id, parsed.group_id);
+      const data = await rest.listInventoryAssetTargets(config, scope, id, parsed.asset_id, {
+        limit: parsed.limit,
+        starting_after: parsed.starting_after,
+        ending_before: parsed.ending_before,
+      });
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }], isError: false };
+    }
+
+    if (name === "snyk_create_inventory_asset_search") {
+      const parsed = CreateInventoryAssetSearchArgsSchema.parse(args);
+      const { scope, id } = resolveInventoryScope(parsed.tenant_id, parsed.org_id, parsed.group_id);
+      const data = await rest.createInventoryAssetSearch(config, scope, id, {
+        filter: parsed.filter,
+        sort: parsed.sort,
+        meta_count: parsed.meta_count,
+        limit: parsed.limit,
+      });
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }], isError: false };
+    }
+
+    if (name === "snyk_get_inventory_asset_search_results") {
+      const parsed = GetInventoryAssetSearchResultsArgsSchema.parse(args);
+      const { scope, id } = resolveInventoryScope(parsed.tenant_id, parsed.org_id, parsed.group_id);
+      const data = await rest.getInventoryAssetSearchResults(config, scope, id, parsed.search_id, {
+        sort: parsed.sort,
+        fields: parsed.fields,
+        limit: parsed.limit,
+        starting_after: parsed.starting_after,
+        ending_before: parsed.ending_before,
+      });
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }], isError: false };
+    }
+
+    if (name === "snyk_list_inventory_asset_filters") {
+      const parsed = ListInventoryAssetFiltersArgsSchema.parse(args);
+      const { scope, id } = resolveInventoryScope(parsed.tenant_id, parsed.org_id, parsed.group_id);
+      const data = await rest.listInventoryAssetFilters(config, scope, id, {
+        asset_types: parsed.asset_types,
+        limit: parsed.limit,
+        starting_after: parsed.starting_after,
+        ending_before: parsed.ending_before,
+      });
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }], isError: false };
+    }
+
+    if (name === "snyk_get_inventory_asset_filter_values") {
+      const parsed = GetInventoryAssetFilterValuesArgsSchema.parse(args);
+      const { scope, id } = resolveInventoryScope(parsed.tenant_id, parsed.org_id, parsed.group_id);
+      const data = await rest.getInventoryAssetFilterValues(config, scope, id, parsed.filter_id, {
+        q: parsed.q,
+        key: parsed.key,
+        keys_only: parsed.keys_only,
+        limit: parsed.limit,
+        starting_after: parsed.starting_after,
+        ending_before: parsed.ending_before,
+      });
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }], isError: false };
+    }
+
+    if (name === "snyk_list_inventory_asset_groups") {
+      const parsed = ListInventoryAssetGroupsArgsSchema.parse(args);
+      const { scope, id } = resolveInventoryScope(parsed.tenant_id, parsed.org_id, parsed.group_id);
+      const data = await rest.listInventoryAssetGroups(config, scope, id, {
+        asset_types: parsed.asset_types,
+        limit: parsed.limit,
+        starting_after: parsed.starting_after,
+        ending_before: parsed.ending_before,
+      });
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }], isError: false };
+    }
+
+    if (name === "snyk_get_inventory_asset_group_values") {
+      const parsed = GetInventoryAssetGroupValuesArgsSchema.parse(args);
+      const { scope, id } = resolveInventoryScope(parsed.tenant_id, parsed.org_id, parsed.group_id);
+      const data = await rest.getInventoryAssetGroupValues(config, scope, id, parsed.group_field_id, {
+        asset_types: parsed.asset_types,
+        filter: parsed.filter,
+        sort: parsed.sort,
+        meta_fields: parsed.meta_fields,
+        aggregate: parsed.aggregate,
+        limit: parsed.limit,
+        starting_after: parsed.starting_after,
+        ending_before: parsed.ending_before,
+      });
+      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }], isError: false };
     }
 
     return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };

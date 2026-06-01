@@ -14,6 +14,19 @@ export function sanitizePathSegment(value: string, label: string): string {
   return value;
 }
 
+/**
+ * Sanitize a field/filter identifier used as a path segment (e.g. filter_id,
+ * group_field_id). Allows dots and underscores (e.g. "tags.environment",
+ * "asset_class") while still blocking path traversal and SSRF.
+ */
+export function sanitizeFieldSegment(value: string, label: string): string {
+  if (!value || typeof value !== "string") throw new Error(`Invalid ${label}`);
+  if (value.length > 128 || value.includes("..") || value.includes("/") || !/^[a-zA-Z0-9._-]+$/.test(value)) {
+    throw new Error(`Invalid ${label}: must be alphanumeric with optional . _ -`);
+  }
+  return value;
+}
+
 export interface SnykApiConfig {
   token: string;
   /** Base URL without path, e.g. https://api.snyk.io or https://api.us.snyk.io */

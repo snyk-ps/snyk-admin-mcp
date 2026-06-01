@@ -1,4 +1,4 @@
-import { ASSET_API_VERSION, assertAllowedUrl, getBaseUrl, REST_API_VERSION, sanitizePathSegment, type SnykApiConfig } from "./types.js";
+import { ASSET_API_VERSION, assertAllowedUrl, getBaseUrl, REST_API_VERSION, sanitizeFieldSegment, sanitizePathSegment, type SnykApiConfig } from "./types.js";
 import { fetchWithRetry, restRateLimiter } from "./rateLimit.js";
 
 /**
@@ -283,5 +283,262 @@ export async function bulkUpdateInventoryAssets(
     body: JSON.stringify(body),
   });
   if (!res.ok) throw new Error(`REST bulkUpdateInventoryAssets failed: ${res.status} ${await res.text()}`);
+  return res.json() as Promise<Record<string, unknown>>;
+}
+
+// ---------------------------------------------------------------------------
+// Inventory Assets API (Early Access). Tenant/org/group-scoped asset listing,
+// search (sync + async), single-asset get/update, relationships, and the
+// filters/groups discovery endpoints. Uses ASSET_API_VERSION.
+// Docs: https://docs.snyk.io/developer-tools/snyk-api/reference/inventory-assets
+// ---------------------------------------------------------------------------
+
+/** Scope for Inventory Assets endpoints: tenant, org, or group level. */
+export type InventoryScope = "tenants" | "orgs" | "groups";
+
+/**
+ * Allowlist of valid inventory scope path segments. Looking up the scope here
+ * yields a trusted constant literal, so caller-influenced values can never flow
+ * into the request URL path (SSRF guard).
+ */
+const INVENTORY_SCOPE_SEGMENT: Record<InventoryScope, string> = { tenants: "tenants", orgs: "orgs", groups: "groups" };
+const INVENTORY_SCOPE_LABEL: Record<InventoryScope, string> = { tenants: "tenant_id", orgs: "org_id", groups: "group_id" };
+
+/** Build the validated `/{scope}/{id}/inventory/assets` base path for a scope. */
+function inventoryBase(scope: InventoryScope, scopeId: string): string {
+  const safeScope = INVENTORY_SCOPE_SEGMENT[scope];
+  if (!safeScope) throw new Error(`Invalid inventory scope: ${String(scope)}`);
+  const safeId = sanitizePathSegment(scopeId, INVENTORY_SCOPE_LABEL[scope]);
+  return `/${safeScope}/${safeId}/inventory/assets`;
+}
+
+/** Attributes accepted by the Inventory Assets PATCH endpoints. */
+export interface InventoryAssetAttributes {
+  class?: { display_name?: "A" | "B" | "C" | "D"; rank?: 1 | 2 | 3 | 4; locked?: boolean };
+  labels?: { add?: string[]; remove?: string[] } | { replace: string[] };
+  tags?: { add?: Record<string, string>; remove?: string[] } | { replace: Record<string, string> };
+}
+
+/**
+ * List or search inventory assets synchronously (Early Access).
+ * GET /{scope}/{id}/inventory/assets. Supports an RSQL `filter` expression.
+ */
+export async function listInventoryAssets(
+  config: SnykApiConfig,
+  scope: InventoryScope,
+  scopeId: string,
+  opts: { filter?: string; sort?: string; limit?: number; starting_after?: string; ending_before?: string; fields?: string; meta_count?: string } = {}
+): Promise<Record<string, unknown>> {
+  const base = inventoryBase(scope, scopeId);
+  const qs = buildQuery({
+    filter: opts.filter,
+    sort: opts.sort,
+    limit: opts.limit,
+    starting_after: opts.starting_after,
+    ending_before: opts.ending_before,
+    meta_count: opts.meta_count,
+    "fields[container_images]": opts.fields,
+  });
+  const res = await restFetch(config, `${base}${qs}`, { version: ASSET_API_VERSION });
+  if (!res.ok) throw new Error(`REST listInventoryAssets failed: ${res.status} ${await res.text()}`);
+  return res.json() as Promise<Record<string, unknown>>;
+}
+
+/** Get a single inventory asset by ID (Early Access). GET /{scope}/{id}/inventory/assets/{asset_id}. */
+export async function getInventoryAsset(
+  config: SnykApiConfig,
+  scope: InventoryScope,
+  scopeId: string,
+  assetId: string,
+  opts: { fields?: string } = {}
+): Promise<Record<string, unknown>> {
+  const base = inventoryBase(scope, scopeId);
+  const safeAssetId = sanitizePathSegment(assetId, "asset_id");
+  const qs = buildQuery({ "fields[container_images]": opts.fields });
+  const res = await restFetch(config, `${base}/${safeAssetId}${qs}`, { version: ASSET_API_VERSION });
+  if (!res.ok) throw new Error(`REST getInventoryAsset failed: ${res.status} ${await res.text()}`);
+  return res.json() as Promise<Record<string, unknown>>;
+}
+
+/**
+ * Update a single inventory asset's class, labels, and/or tags (Early Access).
+ * PATCH /{scope}/{id}/inventory/assets/{asset_id}. Body: { data: { type, id, attributes } }.
+ */
+export async function updateInventoryAsset(
+  config: SnykApiConfig,
+  scope: InventoryScope,
+  scopeId: string,
+  assetId: string,
+  type: string,
+  attributes: InventoryAssetAttributes
+): Promise<Record<string, unknown>> {
+  const base = inventoryBase(scope, scopeId);
+  const safeAssetId = sanitizePathSegment(assetId, "asset_id");
+  const body = { data: { type, id: safeAssetId, attributes } };
+  const res = await restFetch(config, `${base}/${safeAssetId}`, {
+    method: "PATCH",
+    body: JSON.stringify(body),
+    version: ASSET_API_VERSION,
+  });
+  if (!res.ok) throw new Error(`REST updateInventoryAsset failed: ${res.status} ${await res.text()}`);
+  return res.json() as Promise<Record<string, unknown>>;
+}
+
+/** List projects for an inventory asset (Early Access). GET /{scope}/{id}/inventory/assets/{asset_id}/relationships/projects. */
+export async function listInventoryAssetProjects(
+  config: SnykApiConfig,
+  scope: InventoryScope,
+  scopeId: string,
+  assetId: string,
+  opts: { limit?: number; starting_after?: string; ending_before?: string; canonical?: string; target_id?: string; sort?: string } = {}
+): Promise<Record<string, unknown>> {
+  const base = inventoryBase(scope, scopeId);
+  const safeAssetId = sanitizePathSegment(assetId, "asset_id");
+  const qs = buildQuery({
+    limit: opts.limit,
+    starting_after: opts.starting_after,
+    ending_before: opts.ending_before,
+    canonical: opts.canonical,
+    target_id: opts.target_id,
+    sort: opts.sort,
+  });
+  const res = await restFetch(config, `${base}/${safeAssetId}/relationships/projects${qs}`, { version: ASSET_API_VERSION });
+  if (!res.ok) throw new Error(`REST listInventoryAssetProjects failed: ${res.status} ${await res.text()}`);
+  return res.json() as Promise<Record<string, unknown>>;
+}
+
+/** List targets for an inventory asset (Early Access). GET /{scope}/{id}/inventory/assets/{asset_id}/relationships/targets. */
+export async function listInventoryAssetTargets(
+  config: SnykApiConfig,
+  scope: InventoryScope,
+  scopeId: string,
+  assetId: string,
+  opts: { limit?: number; starting_after?: string; ending_before?: string } = {}
+): Promise<Record<string, unknown>> {
+  const base = inventoryBase(scope, scopeId);
+  const safeAssetId = sanitizePathSegment(assetId, "asset_id");
+  const qs = buildQuery({ limit: opts.limit, starting_after: opts.starting_after, ending_before: opts.ending_before });
+  const res = await restFetch(config, `${base}/${safeAssetId}/relationships/targets${qs}`, { version: ASSET_API_VERSION });
+  if (!res.ok) throw new Error(`REST listInventoryAssetTargets failed: ${res.status} ${await res.text()}`);
+  return res.json() as Promise<Record<string, unknown>>;
+}
+
+/**
+ * Create an asynchronous inventory asset search (Early Access).
+ * POST /{scope}/{id}/inventory/assets/searches. Returns a search resource whose
+ * results are fetched via getInventoryAssetSearchResults.
+ */
+export async function createInventoryAssetSearch(
+  config: SnykApiConfig,
+  scope: InventoryScope,
+  scopeId: string,
+  attributes: { filter?: string; limit?: number; meta_count?: "with" | "only"; sort?: string } = {}
+): Promise<Record<string, unknown>> {
+  const base = inventoryBase(scope, scopeId);
+  const body = { data: { type: "searches", attributes } };
+  const res = await restFetch(config, `${base}/searches`, {
+    method: "POST",
+    body: JSON.stringify(body),
+    version: ASSET_API_VERSION,
+  });
+  if (!res.ok) throw new Error(`REST createInventoryAssetSearch failed: ${res.status} ${await res.text()}`);
+  return res.json() as Promise<Record<string, unknown>>;
+}
+
+/** Retrieve asynchronous inventory asset search results (Early Access). GET /{scope}/{id}/inventory/assets/searches/{search_id}/results. */
+export async function getInventoryAssetSearchResults(
+  config: SnykApiConfig,
+  scope: InventoryScope,
+  scopeId: string,
+  searchId: string,
+  opts: { sort?: string; limit?: number; starting_after?: string; ending_before?: string; fields?: string } = {}
+): Promise<Record<string, unknown>> {
+  const base = inventoryBase(scope, scopeId);
+  const safeSearchId = sanitizePathSegment(searchId, "search_id");
+  const qs = buildQuery({
+    sort: opts.sort,
+    limit: opts.limit,
+    starting_after: opts.starting_after,
+    ending_before: opts.ending_before,
+    "fields[container_images]": opts.fields,
+  });
+  const res = await restFetch(config, `${base}/searches/${safeSearchId}/results${qs}`, { version: ASSET_API_VERSION });
+  if (!res.ok) throw new Error(`REST getInventoryAssetSearchResults failed: ${res.status} ${await res.text()}`);
+  return res.json() as Promise<Record<string, unknown>>;
+}
+
+/** Get available filter fields for inventory assets (Early Access). GET /{scope}/{id}/inventory/assets/filters. */
+export async function listInventoryAssetFilters(
+  config: SnykApiConfig,
+  scope: InventoryScope,
+  scopeId: string,
+  opts: { asset_types?: string; limit?: number; starting_after?: string; ending_before?: string } = {}
+): Promise<Record<string, unknown>> {
+  const base = inventoryBase(scope, scopeId);
+  const qs = buildQuery({ asset_types: opts.asset_types, limit: opts.limit, starting_after: opts.starting_after, ending_before: opts.ending_before });
+  const res = await restFetch(config, `${base}/filters${qs}`, { version: ASSET_API_VERSION });
+  if (!res.ok) throw new Error(`REST listInventoryAssetFilters failed: ${res.status} ${await res.text()}`);
+  return res.json() as Promise<Record<string, unknown>>;
+}
+
+/** Get filter value suggestions (autocomplete) for a filter field (Early Access). GET /{scope}/{id}/inventory/assets/filters/{filter_id}/values. */
+export async function getInventoryAssetFilterValues(
+  config: SnykApiConfig,
+  scope: InventoryScope,
+  scopeId: string,
+  filterId: string,
+  opts: { q?: string; limit?: number; starting_after?: string; ending_before?: string; keys_only?: boolean; key?: string } = {}
+): Promise<Record<string, unknown>> {
+  const base = inventoryBase(scope, scopeId);
+  const safeFilterId = sanitizeFieldSegment(filterId, "filter_id");
+  const qs = buildQuery({
+    q: opts.q,
+    limit: opts.limit,
+    starting_after: opts.starting_after,
+    ending_before: opts.ending_before,
+    keys_only: opts.keys_only === undefined ? undefined : String(opts.keys_only),
+    key: opts.key,
+  });
+  const res = await restFetch(config, `${base}/filters/${safeFilterId}/values${qs}`, { version: ASSET_API_VERSION });
+  if (!res.ok) throw new Error(`REST getInventoryAssetFilterValues failed: ${res.status} ${await res.text()}`);
+  return res.json() as Promise<Record<string, unknown>>;
+}
+
+/** Get available group fields for inventory assets (Early Access). GET /{scope}/{id}/inventory/assets/groups. */
+export async function listInventoryAssetGroups(
+  config: SnykApiConfig,
+  scope: InventoryScope,
+  scopeId: string,
+  opts: { asset_types?: string; limit?: number; starting_after?: string; ending_before?: string } = {}
+): Promise<Record<string, unknown>> {
+  const base = inventoryBase(scope, scopeId);
+  const qs = buildQuery({ asset_types: opts.asset_types, limit: opts.limit, starting_after: opts.starting_after, ending_before: opts.ending_before });
+  const res = await restFetch(config, `${base}/groups${qs}`, { version: ASSET_API_VERSION });
+  if (!res.ok) throw new Error(`REST listInventoryAssetGroups failed: ${res.status} ${await res.text()}`);
+  return res.json() as Promise<Record<string, unknown>>;
+}
+
+/** Get group value aggregation for a group field (Early Access). GET /{scope}/{id}/inventory/assets/groups/{group_field_id}/values. */
+export async function getInventoryAssetGroupValues(
+  config: SnykApiConfig,
+  scope: InventoryScope,
+  scopeId: string,
+  groupFieldId: string,
+  opts: { asset_types?: string; filter?: string; sort?: string; limit?: number; starting_after?: string; ending_before?: string; meta_fields?: string; aggregate?: string } = {}
+): Promise<Record<string, unknown>> {
+  const base = inventoryBase(scope, scopeId);
+  const safeGroupFieldId = sanitizeFieldSegment(groupFieldId, "group_field_id");
+  const qs = buildQuery({
+    asset_types: opts.asset_types,
+    filter: opts.filter,
+    sort: opts.sort,
+    limit: opts.limit,
+    starting_after: opts.starting_after,
+    ending_before: opts.ending_before,
+    meta_fields: opts.meta_fields,
+    aggregate: opts.aggregate,
+  });
+  const res = await restFetch(config, `${base}/groups/${safeGroupFieldId}/values${qs}`, { version: ASSET_API_VERSION });
+  if (!res.ok) throw new Error(`REST getInventoryAssetGroupValues failed: ${res.status} ${await res.text()}`);
   return res.json() as Promise<Record<string, unknown>>;
 }
