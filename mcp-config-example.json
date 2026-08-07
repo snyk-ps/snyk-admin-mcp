@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "snyk-admin": {
-      "command": "node",
-      "args": ["/ABSOLUTE/PATH/TO/snyk-admin-mcp/dist/index.js"]
-    }
-  }
-}
