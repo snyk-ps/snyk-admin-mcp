@@ -12,12 +12,13 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import {
   CallToolRequestSchema,
   ListToolsRequestSchema,
+  type CallToolRequest,
 } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import * as rest from "./snyk/rest.js";
 import * as v1 from "./snyk/v1.js";
 import { sanitizePathSegment, type SnykApiConfig } from "./snyk/types.js";
-import { createApproval, consumeApproval } from "./approval.js";
+import { runMutationTool, type ToolResult } from "./mutation.js";
 
 const SNYK_TOKEN = process.env.SNYK_API_TOKEN ?? process.env.SNYK_TOKEN ?? "";
 const SNYK_REGION = (process.env.SNYK_API_REGION ?? "global") as "global" | "eu" | "us" | "au";
@@ -68,27 +69,23 @@ const CloneIntegrationArgsSchema = z.object({
   approval_token: z.string().optional(),
 });
 
-// --- Bulk asset labels (project tags in V1) ---
-const BulkLabelsArgsSchema = z.object({
+// --- Add project tags (V1 project tags). Not a real batch API — one HTTP call per project x tag. ---
+const AddProjectTagsArgsSchema = z.object({
   org_id: z.string().describe("Organization ID"),
-  project_ids: z.array(z.string()).describe("List of project IDs to apply labels to"),
-  labels: z.array(z.object({
+  project_ids: z.array(z.string()).describe("List of project IDs to apply tags to"),
+  tags: z.array(z.object({
     key: z.string(),
     value: z.string().optional(),
-  })).describe("Labels to add (key or key:value)"),
+  })).describe("Tags to add (key or key:value)"),
   dry_run: z.boolean().default(true),
   approval_token: z.string().optional(),
 });
 
-// --- Bulk update inventory assets (REST Inventory Assets API) ---
-const BulkUpdateInventoryAssetsArgsSchema = z.object({
+// --- Remove project tags (V1 project tags). Not a real batch API — one HTTP call per project x key. ---
+const RemoveProjectTagsArgsSchema = z.object({
   org_id: z.string().describe("Organization ID"),
-  updates: z.array(z.object({
-    asset_id: z.string().describe("Inventory asset ID to update"),
-    class: z.string().optional().describe("Asset classification"),
-    labels: z.array(z.string()).optional().describe("Free-form labels"),
-    tags: z.record(z.string(), z.string()).optional().describe("Structured key:value tags"),
-  })).min(1).describe("List of asset updates (each can set class, labels, and/or tags)"),
+  project_ids: z.array(z.string()).describe("List of project IDs to remove tags from"),
+  tag_keys: z.array(z.string()).describe("Tag keys to remove (removal is by key only, no value)"),
   dry_run: z.boolean().default(true),
   approval_token: z.string().optional(),
 });
@@ -169,181 +166,17 @@ const UpdateAssetArgsSchema = z.object({
   approval_token: z.string().optional(),
 });
 
-const ListRepositoryAliasesArgsSchema = z.object({
-  group_id: z.string().optional().describe("Group ID (provide this or org_id)"),
-  org_id: z.string().optional().describe("Org ID (provide this or group_id)"),
-  url: z.string().optional().describe("Optional repository URL filter"),
-  limit: z.number().int().min(10).max(100).optional(),
-  starting_after: z.string().optional(),
-  ending_before: z.string().optional(),
-});
-
-const AddRepositoryAliasArgsSchema = z.object({
-  group_id: z.string().optional().describe("Group ID (provide this or org_id)"),
-  org_id: z.string().optional().describe("Org ID (provide this or group_id)"),
-  aliases: z.array(z.object({
-    url: z.string().describe("The canonical repository URL"),
-    new_url: z.string().describe("The alias URL to link to the canonical URL"),
-  })).min(1).max(100).describe("Repository aliases to add"),
+// --- Bulk update inventory assets (REST Inventory Assets API — bulk endpoint only) ---
+const BulkUpdateInventoryAssetsArgsSchema = z.object({
+  org_id: z.string().describe("Organization ID"),
+  updates: z.array(z.object({
+    asset_id: z.string().describe("Inventory asset ID to update"),
+    class: z.string().optional().describe("Asset classification"),
+    labels: z.array(z.string()).optional().describe("Free-form labels"),
+    tags: z.record(z.string(), z.string()).optional().describe("Structured key:value tags"),
+  })).min(1).describe("List of asset updates (each can set class, labels, and/or tags)"),
   dry_run: z.boolean().default(true),
   approval_token: z.string().optional(),
-});
-
-const RemoveRepositoryAliasArgsSchema = z.object({
-  group_id: z.string().optional().describe("Group ID (provide this or org_id)"),
-  org_id: z.string().optional().describe("Org ID (provide this or group_id)"),
-  aliases: z.array(z.object({
-    id: z.string().describe("The ID of the canonical asset-reference document that owns the alias"),
-    url: z.string().describe("The canonical URL of the document that owns the alias"),
-    new_url: z.string().describe("The aliased URL to detach from its canonical asset"),
-  })).min(1).max(100).describe("Repository aliases to remove"),
-  dry_run: z.boolean().default(true),
-  approval_token: z.string().optional(),
-});
-
-/** Resolve org-or-group scope for repository alias endpoints. */
-function resolveAssetScope(groupId?: string, orgId?: string): { scope: "groups" | "orgs"; id: string } {
-  if (groupId && orgId) throw new Error("Provide either group_id or org_id, not both.");
-  if (groupId) return { scope: "groups", id: groupId };
-  if (orgId) return { scope: "orgs", id: orgId };
-  throw new Error("Provide group_id or org_id.");
-}
-
-// --- Inventory Assets API (Early Access): tenant/org/group scoped ---
-
-/** Resolve tenant/org/group scope for Inventory Assets endpoints (exactly one). */
-function resolveInventoryScope(tenantId?: string, orgId?: string, groupId?: string): { scope: rest.InventoryScope; id: string } {
-  const provided = [tenantId, orgId, groupId].filter((v) => v !== undefined && v !== "").length;
-  if (provided !== 1) throw new Error("Provide exactly one of tenant_id, org_id, or group_id.");
-  if (tenantId) return { scope: "tenants", id: tenantId };
-  if (orgId) return { scope: "orgs", id: orgId };
-  return { scope: "groups", id: groupId! };
-}
-
-/** Shared scope fields for inventory tools. */
-const InventoryScopeShape = {
-  tenant_id: z.string().optional().describe("Tenant ID (provide exactly one of tenant_id/org_id/group_id)"),
-  org_id: z.string().optional().describe("Org ID (provide exactly one of tenant_id/org_id/group_id)"),
-  group_id: z.string().optional().describe("Group ID (provide exactly one of tenant_id/org_id/group_id)"),
-};
-
-const ListInventoryAssetsArgsSchema = z.object({
-  ...InventoryScopeShape,
-  filter: z.string().optional().describe("RSQL filter expression (e.g. \"type==container_images;class==A\")"),
-  sort: z.string().optional().describe("Comma-separated sort fields; prefix with - for descending"),
-  fields: z.string().optional().describe("Comma-separated container_images fields to return (sparse fieldset)"),
-  meta_count: z.enum(["with", "only"]).optional(),
-  limit: z.number().int().min(10).max(100).optional(),
-  starting_after: z.string().optional(),
-  ending_before: z.string().optional(),
-});
-
-const GetInventoryAssetArgsSchema = z.object({
-  ...InventoryScopeShape,
-  asset_id: z.string().describe("Inventory asset ID (UUID)"),
-  fields: z.string().optional().describe("Comma-separated container_images fields to return (sparse fieldset)"),
-});
-
-const InventoryAssetClassSchema = z.object({
-  display_name: z.enum(["A", "B", "C", "D"]).optional(),
-  rank: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4)]).optional(),
-  locked: z.boolean().optional(),
-});
-const InventoryLabelsSchema = z.union([
-  z.object({ add: z.array(z.string()).optional(), remove: z.array(z.string()).optional() }),
-  z.object({ replace: z.array(z.string()) }),
-]);
-const InventoryTagsSchema = z.union([
-  z.object({ add: z.record(z.string(), z.string()).optional(), remove: z.array(z.string()).optional() }),
-  z.object({ replace: z.record(z.string(), z.string()) }),
-]);
-
-const UpdateInventoryAssetArgsSchema = z.object({
-  ...InventoryScopeShape,
-  asset_id: z.string().describe("Inventory asset ID (UUID)"),
-  type: z.string().default("container_images").describe("JSON:API resource type (currently container_images)"),
-  class: InventoryAssetClassSchema.optional(),
-  labels: InventoryLabelsSchema.optional(),
-  tags: InventoryTagsSchema.optional(),
-  dry_run: z.boolean().default(true),
-  approval_token: z.string().optional(),
-});
-
-const ListInventoryAssetProjectsArgsSchema = z.object({
-  ...InventoryScopeShape,
-  asset_id: z.string(),
-  canonical: z.enum(["with", "only", "none"]).optional(),
-  target_id: z.string().optional(),
-  sort: z.string().optional(),
-  limit: z.number().int().min(10).max(100).optional(),
-  starting_after: z.string().optional(),
-  ending_before: z.string().optional(),
-});
-
-const ListInventoryAssetTargetsArgsSchema = z.object({
-  ...InventoryScopeShape,
-  asset_id: z.string(),
-  limit: z.number().int().min(10).max(100).optional(),
-  starting_after: z.string().optional(),
-  ending_before: z.string().optional(),
-});
-
-const CreateInventoryAssetSearchArgsSchema = z.object({
-  ...InventoryScopeShape,
-  filter: z.string().optional().describe("RSQL filter expression"),
-  sort: z.string().optional(),
-  meta_count: z.enum(["with", "only"]).optional(),
-  limit: z.number().int().min(10).max(100).optional(),
-});
-
-const GetInventoryAssetSearchResultsArgsSchema = z.object({
-  ...InventoryScopeShape,
-  search_id: z.string().describe("Search ID returned by snyk_create_inventory_asset_search"),
-  sort: z.string().optional(),
-  fields: z.string().optional(),
-  limit: z.number().int().min(10).max(100).optional(),
-  starting_after: z.string().optional(),
-  ending_before: z.string().optional(),
-});
-
-const ListInventoryAssetFiltersArgsSchema = z.object({
-  ...InventoryScopeShape,
-  asset_types: z.string().optional().describe("Comma-separated asset types to scope filters to"),
-  limit: z.number().int().min(10).max(100).optional(),
-  starting_after: z.string().optional(),
-  ending_before: z.string().optional(),
-});
-
-const GetInventoryAssetFilterValuesArgsSchema = z.object({
-  ...InventoryScopeShape,
-  filter_id: z.string().describe("Filter field ID (e.g. class, tags.environment)"),
-  q: z.string().optional().describe("Autocomplete query string"),
-  key: z.string().optional(),
-  keys_only: z.boolean().optional(),
-  limit: z.number().int().min(10).max(100).optional(),
-  starting_after: z.string().optional(),
-  ending_before: z.string().optional(),
-});
-
-const ListInventoryAssetGroupsArgsSchema = z.object({
-  ...InventoryScopeShape,
-  asset_types: z.string().optional(),
-  limit: z.number().int().min(10).max(100).optional(),
-  starting_after: z.string().optional(),
-  ending_before: z.string().optional(),
-});
-
-const GetInventoryAssetGroupValuesArgsSchema = z.object({
-  ...InventoryScopeShape,
-  group_field_id: z.string().describe("Group field ID to aggregate on"),
-  asset_types: z.string().optional(),
-  filter: z.string().optional().describe("RSQL filter to restrict aggregated assets"),
-  sort: z.string().optional(),
-  meta_fields: z.string().optional().describe("Comma-separated meta fields (e.g. count,last_seen_at)"),
-  aggregate: z.string().optional().describe("Per-field aggregate override"),
-  limit: z.number().int().min(10).max(100).optional(),
-  starting_after: z.string().optional(),
-  ending_before: z.string().optional(),
 });
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
@@ -378,49 +211,37 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
     {
-      name: "snyk_bulk_asset_labels",
-      description: "Add labels (tags) to multiple projects in bulk. Uses Snyk V1 API (project tags). Use dry_run=true first to see the plan, then dry_run=false with approval_token to apply.",
+      name: "snyk_add_project_tags",
+      description: "Add tags to multiple projects (one V1 API call per project x tag, not a single batch request). Uses Snyk V1 API (project tags). Note: these are project tags, not asset labels — use snyk_update_asset for asset labels. Use dry_run=true first to see the plan, then dry_run=false with approval_token to apply.",
       inputSchema: {
         type: "object",
         properties: {
           org_id: { type: "string", description: "Organization ID" },
-          project_ids: { type: "array", items: { type: "string" }, description: "List of project IDs to apply labels to" },
-          labels: {
+          project_ids: { type: "array", items: { type: "string" }, description: "List of project IDs to apply tags to" },
+          tags: {
             type: "array",
             items: { type: "object", properties: { key: { type: "string" }, value: { type: "string" } }, required: ["key"] },
-            description: "Labels to add (key or key:value)",
+            description: "Tags to add (key or key:value)",
           },
           dry_run: { type: "boolean", default: true },
           approval_token: { type: "string" },
         },
-        required: ["org_id", "project_ids", "labels"],
+        required: ["org_id", "project_ids", "tags"],
       },
     },
     {
-      name: "snyk_bulk_update_inventory_assets",
-      description: "Bulk update inventory assets (class, labels, tags) using the REST Inventory Assets API (PATCH /orgs/{org_id}/inventory/assets). Use dry_run=true first, then dry_run=false with approval_token to apply.",
+      name: "snyk_remove_project_tags",
+      description: "Remove tags (by key) from multiple projects (one V1 API call per project x key, not a single batch request). Uses Snyk V1 API (project tags). Removal is by key only — no value needed. Use dry_run=true first to see the plan, then dry_run=false with approval_token to apply.",
       inputSchema: {
         type: "object",
         properties: {
           org_id: { type: "string", description: "Organization ID" },
-          updates: {
-            type: "array",
-            items: {
-              type: "object",
-              properties: {
-                asset_id: { type: "string", description: "Inventory asset ID to update" },
-                class: { type: "string", description: "Asset classification" },
-                labels: { type: "array", items: { type: "string" }, description: "Free-form labels" },
-                tags: { type: "object", additionalProperties: { type: "string" }, description: "Structured key:value tags" },
-              },
-              required: ["asset_id"],
-            },
-            description: "List of asset updates",
-          },
+          project_ids: { type: "array", items: { type: "string" }, description: "List of project IDs to remove tags from" },
+          tag_keys: { type: "array", items: { type: "string" }, description: "Tag keys to remove" },
           dry_run: { type: "boolean", default: true },
           approval_token: { type: "string" },
         },
-        required: ["org_id", "updates"],
+        required: ["org_id", "project_ids", "tag_keys"],
       },
     },
     {
@@ -591,305 +412,36 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
     {
-      name: "snyk_list_repository_aliases",
-      description: "List repository aliases for a group or org (REST Asset API, Early Access). GET /{groups|orgs}/{id}/assets/repository/aliases. Read-only. Provide group_id or org_id.",
+      name: "snyk_bulk_update_inventory_assets",
+      description: "Bulk update inventory assets (class, labels, tags) using the REST Inventory Assets API's bulk endpoint (PATCH /orgs/{org_id}/inventory/assets) — the only bulk (multi-asset, single-request) labeling operation this server exposes; snyk_update_asset only updates one asset per call. Use dry_run=true first, then dry_run=false with approval_token to apply.",
       inputSchema: {
         type: "object",
         properties: {
-          group_id: { type: "string", description: "Group ID (provide this or org_id)" },
-          org_id: { type: "string", description: "Org ID (provide this or group_id)" },
-          url: { type: "string", description: "Optional repository URL filter" },
-          limit: { type: "number", description: "Records to return (10-100)" },
-          starting_after: { type: "string" },
-          ending_before: { type: "string" },
-        },
-      },
-    },
-    {
-      name: "snyk_add_repository_alias",
-      description: "Add repository aliases for a group or org (REST Asset API, Early Access). POST /{groups|orgs}/{id}/assets/repository/aliases. Provide group_id or org_id. Use dry_run=true first, then dry_run=false with approval_token to apply.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          group_id: { type: "string", description: "Group ID (provide this or org_id)" },
-          org_id: { type: "string", description: "Org ID (provide this or group_id)" },
-          aliases: {
+          org_id: { type: "string", description: "Organization ID" },
+          updates: {
             type: "array",
-            minItems: 1,
-            maxItems: 100,
             items: {
               type: "object",
               properties: {
-                url: { type: "string", description: "The canonical repository URL" },
-                new_url: { type: "string", description: "The alias URL to link to the canonical URL" },
+                asset_id: { type: "string", description: "Inventory asset ID to update" },
+                class: { type: "string", description: "Asset classification" },
+                labels: { type: "array", items: { type: "string" }, description: "Free-form labels" },
+                tags: { type: "object", additionalProperties: { type: "string" }, description: "Structured key:value tags" },
               },
-              required: ["url", "new_url"],
+              required: ["asset_id"],
             },
-            description: "Repository aliases to add",
+            description: "List of asset updates",
           },
           dry_run: { type: "boolean", default: true },
           approval_token: { type: "string" },
         },
-        required: ["aliases"],
-      },
-    },
-    {
-      name: "snyk_remove_repository_alias",
-      description: "Remove repository aliases from a group or org (REST Asset API, Early Access). DELETE /{groups|orgs}/{id}/assets/repository/aliases. Provide group_id or org_id. Use dry_run=true first, then dry_run=false with approval_token to apply.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          group_id: { type: "string", description: "Group ID (provide this or org_id)" },
-          org_id: { type: "string", description: "Org ID (provide this or group_id)" },
-          aliases: {
-            type: "array",
-            minItems: 1,
-            maxItems: 100,
-            items: {
-              type: "object",
-              properties: {
-                id: { type: "string", description: "The ID of the canonical asset-reference document that owns the alias" },
-                url: { type: "string", description: "The canonical URL of the document that owns the alias" },
-                new_url: { type: "string", description: "The aliased URL to detach from its canonical asset" },
-              },
-              required: ["id", "url", "new_url"],
-            },
-            description: "Repository aliases to remove",
-          },
-          dry_run: { type: "boolean", default: true },
-          approval_token: { type: "string" },
-        },
-        required: ["aliases"],
-      },
-    },
-    {
-      name: "snyk_list_inventory_assets",
-      description: "List or search inventory assets synchronously (REST Inventory Assets API, Early Access). GET /{tenants|orgs|groups}/{id}/inventory/assets. Read-only. Provide exactly one of tenant_id/org_id/group_id. Supports an RSQL `filter`.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          tenant_id: { type: "string", description: "Tenant ID (provide exactly one scope)" },
-          org_id: { type: "string", description: "Org ID (provide exactly one scope)" },
-          group_id: { type: "string", description: "Group ID (provide exactly one scope)" },
-          filter: { type: "string", description: "RSQL filter expression, e.g. \"type==container_images;class==A\"" },
-          sort: { type: "string", description: "Comma-separated sort fields; prefix - for descending" },
-          fields: { type: "string", description: "Comma-separated container_images fields (sparse fieldset)" },
-          meta_count: { type: "string", enum: ["with", "only"] },
-          limit: { type: "number", description: "Records to return (10-100)" },
-          starting_after: { type: "string" },
-          ending_before: { type: "string" },
-        },
-      },
-    },
-    {
-      name: "snyk_get_inventory_asset",
-      description: "Get a single inventory asset by ID (REST Inventory Assets API, Early Access). GET /{tenants|orgs|groups}/{id}/inventory/assets/{asset_id}. Read-only.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          tenant_id: { type: "string" },
-          org_id: { type: "string" },
-          group_id: { type: "string" },
-          asset_id: { type: "string", description: "Inventory asset ID (UUID)" },
-          fields: { type: "string", description: "Comma-separated container_images fields (sparse fieldset)" },
-        },
-        required: ["asset_id"],
-      },
-    },
-    {
-      name: "snyk_update_inventory_asset",
-      description: "Update a single inventory asset's class, labels, and/or tags (REST Inventory Assets API, Early Access). PATCH /{tenants|orgs|groups}/{id}/inventory/assets/{asset_id}. Use dry_run=true first, then dry_run=false with approval_token to apply.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          tenant_id: { type: "string" },
-          org_id: { type: "string" },
-          group_id: { type: "string" },
-          asset_id: { type: "string", description: "Inventory asset ID (UUID)" },
-          type: { type: "string", description: "JSON:API resource type (currently container_images)", default: "container_images" },
-          class: {
-            type: "object",
-            properties: {
-              display_name: { type: "string", enum: ["A", "B", "C", "D"] },
-              rank: { type: "number", enum: [1, 2, 3, 4] },
-              locked: { type: "boolean" },
-            },
-            description: "Set asset class by display_name (A-D) or rank (1-4)",
-          },
-          labels: {
-            type: "object",
-            description: "Labels: either {add,remove} or {replace}",
-            properties: {
-              add: { type: "array", items: { type: "string" } },
-              remove: { type: "array", items: { type: "string" } },
-              replace: { type: "array", items: { type: "string" } },
-            },
-          },
-          tags: {
-            type: "object",
-            description: "Tags: either {add,remove} or {replace}",
-            properties: {
-              add: { type: "object", additionalProperties: { type: "string" } },
-              remove: { type: "array", items: { type: "string" } },
-              replace: { type: "object", additionalProperties: { type: "string" } },
-            },
-          },
-          dry_run: { type: "boolean", default: true },
-          approval_token: { type: "string" },
-        },
-        required: ["asset_id"],
-      },
-    },
-    {
-      name: "snyk_list_inventory_asset_projects",
-      description: "List projects for an inventory asset (REST Inventory Assets API, Early Access). GET .../inventory/assets/{asset_id}/relationships/projects. Read-only.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          tenant_id: { type: "string" },
-          org_id: { type: "string" },
-          group_id: { type: "string" },
-          asset_id: { type: "string" },
-          canonical: { type: "string", enum: ["with", "only", "none"] },
-          target_id: { type: "string" },
-          sort: { type: "string" },
-          limit: { type: "number", description: "Records to return (10-100)" },
-          starting_after: { type: "string" },
-          ending_before: { type: "string" },
-        },
-        required: ["asset_id"],
-      },
-    },
-    {
-      name: "snyk_list_inventory_asset_targets",
-      description: "List targets for an inventory asset (REST Inventory Assets API, Early Access). GET .../inventory/assets/{asset_id}/relationships/targets. Read-only.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          tenant_id: { type: "string" },
-          org_id: { type: "string" },
-          group_id: { type: "string" },
-          asset_id: { type: "string" },
-          limit: { type: "number", description: "Records to return (10-100)" },
-          starting_after: { type: "string" },
-          ending_before: { type: "string" },
-        },
-        required: ["asset_id"],
-      },
-    },
-    {
-      name: "snyk_create_inventory_asset_search",
-      description: "Create an asynchronous inventory asset search (REST Inventory Assets API, Early Access). POST .../inventory/assets/searches. Returns a search id; fetch results with snyk_get_inventory_asset_search_results. Read-only (no asset changes).",
-      inputSchema: {
-        type: "object",
-        properties: {
-          tenant_id: { type: "string" },
-          org_id: { type: "string" },
-          group_id: { type: "string" },
-          filter: { type: "string", description: "RSQL filter expression" },
-          sort: { type: "string" },
-          meta_count: { type: "string", enum: ["with", "only"] },
-          limit: { type: "number", description: "Results per page (10-100)" },
-        },
-      },
-    },
-    {
-      name: "snyk_get_inventory_asset_search_results",
-      description: "Retrieve asynchronous inventory asset search results (REST Inventory Assets API, Early Access). GET .../inventory/assets/searches/{search_id}/results. Read-only.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          tenant_id: { type: "string" },
-          org_id: { type: "string" },
-          group_id: { type: "string" },
-          search_id: { type: "string", description: "Search ID from snyk_create_inventory_asset_search" },
-          sort: { type: "string" },
-          fields: { type: "string", description: "Comma-separated container_images fields (sparse fieldset)" },
-          limit: { type: "number", description: "Records to return (10-100)" },
-          starting_after: { type: "string" },
-          ending_before: { type: "string" },
-        },
-        required: ["search_id"],
-      },
-    },
-    {
-      name: "snyk_list_inventory_asset_filters",
-      description: "Get available filter fields for inventory assets (REST Inventory Assets API, Early Access). GET .../inventory/assets/filters. Read-only.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          tenant_id: { type: "string" },
-          org_id: { type: "string" },
-          group_id: { type: "string" },
-          asset_types: { type: "string", description: "Comma-separated asset types to scope filters to" },
-          limit: { type: "number", description: "Records to return (10-100)" },
-          starting_after: { type: "string" },
-          ending_before: { type: "string" },
-        },
-      },
-    },
-    {
-      name: "snyk_get_inventory_asset_filter_values",
-      description: "Get filter value suggestions (autocomplete) for a filter field (REST Inventory Assets API, Early Access). GET .../inventory/assets/filters/{filter_id}/values. Read-only.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          tenant_id: { type: "string" },
-          org_id: { type: "string" },
-          group_id: { type: "string" },
-          filter_id: { type: "string", description: "Filter field ID (e.g. class, tags.environment)" },
-          q: { type: "string", description: "Autocomplete query string" },
-          key: { type: "string" },
-          keys_only: { type: "boolean" },
-          limit: { type: "number", description: "Records to return (10-100)" },
-          starting_after: { type: "string" },
-          ending_before: { type: "string" },
-        },
-        required: ["filter_id"],
-      },
-    },
-    {
-      name: "snyk_list_inventory_asset_groups",
-      description: "Get available group fields for inventory assets (REST Inventory Assets API, Early Access). GET .../inventory/assets/groups. Read-only.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          tenant_id: { type: "string" },
-          org_id: { type: "string" },
-          group_id: { type: "string" },
-          asset_types: { type: "string" },
-          limit: { type: "number", description: "Records to return (10-100)" },
-          starting_after: { type: "string" },
-          ending_before: { type: "string" },
-        },
-      },
-    },
-    {
-      name: "snyk_get_inventory_asset_group_values",
-      description: "Get group value aggregation for a group field (REST Inventory Assets API, Early Access). GET .../inventory/assets/groups/{group_field_id}/values. Read-only.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          tenant_id: { type: "string" },
-          org_id: { type: "string" },
-          group_id: { type: "string" },
-          group_field_id: { type: "string", description: "Group field ID to aggregate on" },
-          asset_types: { type: "string" },
-          filter: { type: "string", description: "RSQL filter to restrict aggregated assets" },
-          sort: { type: "string" },
-          meta_fields: { type: "string", description: "Comma-separated meta fields (e.g. count,last_seen_at)" },
-          aggregate: { type: "string", description: "Per-field aggregate override" },
-          limit: { type: "number", description: "Records to return (10-100)" },
-          starting_after: { type: "string" },
-          ending_before: { type: "string" },
-        },
-        required: ["group_field_id"],
+        required: ["org_id", "updates"],
       },
     },
   ],
 }));
 
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
+async function handleToolCall(request: CallToolRequest): Promise<ToolResult> {
   const { name, arguments: args } = request.params;
   try {
     const config = getConfig();
@@ -1005,21 +557,6 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       };
     }
 
-    if (name === "snyk_list_repository_aliases") {
-      const parsed = ListRepositoryAliasesArgsSchema.parse(args);
-      const { scope, id } = resolveAssetScope(parsed.group_id, parsed.org_id);
-      const data = await rest.listRepositoryAliases(config, scope, id, {
-        url: parsed.url,
-        limit: parsed.limit,
-        starting_after: parsed.starting_after,
-        ending_before: parsed.ending_before,
-      });
-      return {
-        content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
-        isError: false,
-      };
-    }
-
     if (name === "snyk_create_organization") {
       const parsed = CreateOrganizationArgsSchema.parse(args);
       const resolvedGroupId = parsed.group_id ?? (await rest.getDefaultGroupId(config));
@@ -1032,72 +569,53 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           isError: true,
         };
       }
-      if (parsed.dry_run) {
-        const plan = {
-          action: "create_organization",
-          name: parsed.name,
-          group_id: resolvedGroupId,
-          source_org_id: parsed.source_org_id,
-        };
-        const approval_token = createApproval(plan);
-        const sourceOrgLabel = parsed.source_org_id ? ` (copying settings from ${await formatOrgId(config, parsed.source_org_id)})` : "";
-        return {
-          content: [{
-            type: "text",
-            text: `Dry run – will create organization "${parsed.name}" in group ${resolvedGroupId}${sourceOrgLabel}.\n\nPlan:\n${JSON.stringify(plan, null, 2)}\n\nTo apply, call snyk_create_organization with dry_run=false and approval_token="${approval_token}"`,
-          }],
-          isError: false,
-        };
-      }
-      const plan = consumeApproval(parsed.approval_token ?? "");
-      if (!plan || (plan as { action?: string }).action !== "create_organization") {
-        return { content: [{ type: "text", text: "Invalid or expired approval_token. Run with dry_run=true first." }], isError: true };
-      }
-      const p = plan as { name: string; group_id?: string; source_org_id?: string };
-      const result = await v1.createOrganization(config, {
-        name: p.name,
-        group_id: p.group_id ? sanitizePathSegment(p.group_id, "group_id") : undefined,
-        source_org_id: p.source_org_id ? sanitizePathSegment(p.source_org_id, "source_org_id") : undefined,
+      type CreateOrgPlan = { name: string; group_id: string; source_org_id?: string };
+      return await runMutationTool<CreateOrgPlan>({
+        action: "create_organization",
+        dryRun: parsed.dry_run,
+        approvalToken: parsed.approval_token,
+        bindingArgs: { name: parsed.name, group_id: resolvedGroupId, source_org_id: parsed.source_org_id },
+        buildPlanData: () => ({ name: parsed.name, group_id: resolvedGroupId, source_org_id: parsed.source_org_id }),
+        describeDryRun: async (data) => {
+          const sourceOrgLabel = data.source_org_id ? ` (copying settings from ${await formatOrgId(config, data.source_org_id)})` : "";
+          return `Dry run – will create organization "${data.name}" in group ${data.group_id}${sourceOrgLabel}.\n\nPlan:\n${JSON.stringify(data, null, 2)}`;
+        },
+        apply: async (data) => {
+          const result = await v1.createOrganization(config, {
+            name: data.name,
+            group_id: sanitizePathSegment(data.group_id, "group_id"),
+            source_org_id: data.source_org_id ? sanitizePathSegment(data.source_org_id, "source_org_id") : undefined,
+          });
+          const resultOrgName = (result as { name?: string }).name ?? (result as { id?: string }).id;
+          return `Organization created: ${resultOrgName}. Result: ${JSON.stringify(result, null, 2)}`;
+        },
       });
-      const resultOrgName = (result as { name?: string }).name ?? (result as { id?: string }).id;
-      return {
-        content: [{ type: "text", text: `Organization created: ${resultOrgName}. Result: ${JSON.stringify(result, null, 2)}` }],
-        isError: false,
-      };
     }
 
     if (name === "snyk_copy_org_settings") {
       const parsed = CopySettingsArgsSchema.parse(args);
-      const sourceLabel = await formatOrgId(config, parsed.source_org_id);
-      const targetLabel = await formatOrgId(config, parsed.target_org_id);
-      if (parsed.dry_run) {
-        const settings = await v1.getOrgSettings(config, sanitizePathSegment(parsed.source_org_id, "source_org_id"));
-        const plan = {
-          action: "copy_org_settings",
+      type CopySettingsPlan = { source_org_id: string; target_org_id: string; settings_to_apply: Record<string, unknown> };
+      return await runMutationTool<CopySettingsPlan>({
+        action: "copy_org_settings",
+        dryRun: parsed.dry_run,
+        approvalToken: parsed.approval_token,
+        bindingArgs: { source_org_id: parsed.source_org_id, target_org_id: parsed.target_org_id },
+        buildPlanData: async () => ({
           source_org_id: parsed.source_org_id,
           target_org_id: parsed.target_org_id,
-          settings_to_apply: settings,
-          note: "Only requestAccess and similar editable fields will be applied (V1 org settings).",
-        };
-        const approval_token = createApproval(plan);
-        return {
-          content: [{
-            type: "text",
-            text: `Dry run – copy settings from ${sourceLabel} to ${targetLabel}.\n\nPlan:\n${JSON.stringify(plan, null, 2)}\n\nTo apply, call snyk_copy_org_settings again with dry_run=false and approval_token="${approval_token}"`,
-          }],
-          isError: false,
-        };
-      }
-      const plan = consumeApproval(parsed.approval_token ?? "");
-      if (!plan || (plan as { action?: string }).action !== "copy_org_settings") {
-        return { content: [{ type: "text", text: "Invalid or expired approval_token. Run with dry_run=true first." }], isError: true };
-      }
-      const p = plan as { settings_to_apply?: Record<string, unknown>; target_org_id?: string };
-      await v1.updateOrgSettings(config, sanitizePathSegment(p.target_org_id!, "target_org_id"), p.settings_to_apply ?? {});
-      return {
-        content: [{ type: "text", text: `Org settings copied to ${targetLabel}.` }],
-        isError: false,
-      };
+          settings_to_apply: await v1.getOrgSettings(config, sanitizePathSegment(parsed.source_org_id, "source_org_id")),
+        }),
+        describeDryRun: async (data) => {
+          const sourceLabel = await formatOrgId(config, data.source_org_id);
+          const targetLabel = await formatOrgId(config, data.target_org_id);
+          return `Dry run – copy settings from ${sourceLabel} to ${targetLabel}.\n\nPlan:\n${JSON.stringify(data, null, 2)}\n\nNote: only requestAccess and similar editable fields will be applied (V1 org settings).`;
+        },
+        apply: async (data) => {
+          await v1.updateOrgSettings(config, sanitizePathSegment(data.target_org_id, "target_org_id"), data.settings_to_apply);
+          const targetLabel = await formatOrgId(config, data.target_org_id);
+          return `Org settings copied to ${targetLabel}.`;
+        },
+      });
     }
 
     if (name === "snyk_clone_integration") {
@@ -1114,141 +632,99 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           isError: true,
         };
       }
-      const sourceLabel = await formatOrgId(config, parsed.source_org_id);
-      const targetLabel = await formatOrgId(config, parsed.target_org_id);
-      const integrationLabel = await formatIntegrationId(config, parsed.source_org_id, parsed.integration_id);
-      if (parsed.dry_run) {
-        const plan = {
-          action: "clone_integration",
+      type CloneIntegrationPlan = { source_org_id: string; integration_id: string; target_org_id: string };
+      return await runMutationTool<CloneIntegrationPlan>({
+        action: "clone_integration",
+        dryRun: parsed.dry_run,
+        approvalToken: parsed.approval_token,
+        bindingArgs: { source_org_id: parsed.source_org_id, integration_id: parsed.integration_id, target_org_id: parsed.target_org_id },
+        buildPlanData: () => ({
           source_org_id: parsed.source_org_id,
           integration_id: parsed.integration_id,
           target_org_id: parsed.target_org_id,
-        };
-        const approval_token = createApproval(plan);
-        return {
-          content: [{
-            type: "text",
-            text: `Dry run – clone integration ${integrationLabel} from ${sourceLabel} to ${targetLabel}.\n\nPlan:\n${JSON.stringify(plan, null, 2)}\n\nTo apply, call snyk_clone_integration with dry_run=false and approval_token="${approval_token}"`,
-          }],
-          isError: false,
-        };
-      }
-      const plan = consumeApproval(parsed.approval_token ?? "");
-      if (!plan || (plan as { action?: string }).action !== "clone_integration") {
-        return { content: [{ type: "text", text: "Invalid or expired approval_token. Run with dry_run=true first." }], isError: true };
-      }
-      const p = plan as { source_org_id: string; integration_id: string; target_org_id: string };
-      const result = await v1.cloneIntegration(
-        config,
-        sanitizePathSegment(p.source_org_id, "source_org_id"),
-        sanitizePathSegment(p.integration_id, "integration_id"),
-        sanitizePathSegment(p.target_org_id, "target_org_id")
-      );
-      const doneTargetLabel = await formatOrgId(config, p.target_org_id);
-      const doneIntegrationLabel = await formatIntegrationId(config, p.source_org_id, p.integration_id);
-      return {
-        content: [{ type: "text", text: `Integration ${doneIntegrationLabel} cloned to ${doneTargetLabel}.\n\nResult: ${JSON.stringify(result, null, 2)}` }],
-        isError: false,
-      };
-    }
-
-    if (name === "snyk_bulk_asset_labels") {
-      const parsed = BulkLabelsArgsSchema.parse(args);
-      if (parsed.dry_run) {
-        const plan = {
-          action: "bulk_asset_labels",
-          org_id: parsed.org_id,
-          project_ids: parsed.project_ids,
-          labels: parsed.labels,
-          total_operations: parsed.project_ids.length * parsed.labels.length,
-        };
-        const approval_token = createApproval(plan);
-        return {
-          content: [{
-            type: "text",
-            text: `Dry run – will add ${parsed.labels.length} label(s) to ${parsed.project_ids.length} project(s) (${plan.total_operations} operations).\n${JSON.stringify(plan, null, 2)}\n\nTo apply, call snyk_bulk_asset_labels with dry_run=false and approval_token="${approval_token}"`,
-          }],
-          isError: false,
-        };
-      }
-      const plan = consumeApproval(parsed.approval_token ?? "");
-      if (!plan || (plan as { action?: string }).action !== "bulk_asset_labels") {
-        return { content: [{ type: "text", text: "Invalid or expired approval_token. Run with dry_run=true first." }], isError: true };
-      }
-      const p = plan as { org_id: string; project_ids: string[]; labels: { key: string; value?: string }[] };
-      const safeOrgId = sanitizePathSegment(p.org_id, "org_id");
-      const results: { projectId: string; label: { key: string; value?: string }; ok: boolean; error?: string }[] = [];
-      for (const projectId of p.project_ids) {
-        const safeProjectId = sanitizePathSegment(projectId, "project_id");
-        for (const label of p.labels) {
-          try {
-            await v1.addProjectTag(config, safeOrgId, safeProjectId, label.key, label.value);
-            results.push({ projectId, label, ok: true });
-          } catch (err) {
-            results.push({ projectId, label, ok: false, error: String(err) });
-          }
-        }
-      }
-      return {
-        content: [{ type: "text", text: `Bulk labels applied. Results:\n${JSON.stringify(results, null, 2)}` }],
-        isError: false,
-      };
-    }
-
-    if (name === "snyk_bulk_update_inventory_assets") {
-      const parsed = BulkUpdateInventoryAssetsArgsSchema.parse(args);
-      const orgLabel = await formatOrgId(config, parsed.org_id);
-      const data = parsed.updates.map((u) => {
-        const attributes: { class?: string; labels?: string[]; tags?: Record<string, string> } = {};
-        if (u.class !== undefined) attributes.class = u.class;
-        if (u.labels !== undefined) attributes.labels = u.labels;
-        if (u.tags !== undefined) attributes.tags = u.tags;
-        return {
-          type: "asset" as const,
-          id: sanitizePathSegment(u.asset_id, "asset_id"),
-          attributes,
-        };
+        }),
+        describeDryRun: async (data) => {
+          const sourceLabel = await formatOrgId(config, data.source_org_id);
+          const targetLabel = await formatOrgId(config, data.target_org_id);
+          const integrationLabel = await formatIntegrationId(config, data.source_org_id, data.integration_id);
+          return `Dry run – clone integration ${integrationLabel} from ${sourceLabel} to ${targetLabel}.\n\nPlan:\n${JSON.stringify(data, null, 2)}`;
+        },
+        apply: async (data) => {
+          const result = await v1.cloneIntegration(
+            config,
+            sanitizePathSegment(data.source_org_id, "source_org_id"),
+            sanitizePathSegment(data.integration_id, "integration_id"),
+            sanitizePathSegment(data.target_org_id, "target_org_id")
+          );
+          const doneTargetLabel = await formatOrgId(config, data.target_org_id);
+          const doneIntegrationLabel = await formatIntegrationId(config, data.source_org_id, data.integration_id);
+          return `Integration ${doneIntegrationLabel} cloned to ${doneTargetLabel}.\n\nResult: ${JSON.stringify(result, null, 2)}`;
+        },
       });
-      const withAttributes = data.filter((d) => Object.keys(d.attributes).length > 0);
-      if (withAttributes.length === 0 && data.length > 0) {
-        return {
-          content: [{ type: "text", text: "Each update must specify at least one of: class, labels, or tags." }],
-          isError: true,
-        };
-      }
-      const body = { data: withAttributes.length > 0 ? withAttributes : data };
-      if (parsed.dry_run) {
-        const plan = {
-          action: "bulk_update_inventory_assets",
-          org_id: parsed.org_id,
-          update_count: body.data.length,
-          updates: parsed.updates,
-          request_body: body,
-        };
-        const approval_token = createApproval(plan);
-        return {
-          content: [{
-            type: "text",
-            text: `Dry run – will bulk update ${parsed.updates.length} inventory asset(s) in ${orgLabel}.\n\nPlan:\n${JSON.stringify(plan, null, 2)}\n\nTo apply, call snyk_bulk_update_inventory_assets with dry_run=false and approval_token="${approval_token}"`,
-          }],
-          isError: false,
-        };
-      }
-      const plan = consumeApproval(parsed.approval_token ?? "");
-      if (!plan || (plan as { action?: string }).action !== "bulk_update_inventory_assets") {
-        return { content: [{ type: "text", text: "Invalid or expired approval_token. Run with dry_run=true first." }], isError: true };
-      }
-      const p = plan as { org_id: string; request_body: typeof body };
-      const result = await rest.bulkUpdateInventoryAssets(
-        config,
-        sanitizePathSegment(p.org_id, "org_id"),
-        p.request_body
-      );
-      const doneLabel = await formatOrgId(config, p.org_id);
-      return {
-        content: [{ type: "text", text: `Bulk inventory assets updated in ${doneLabel}.\n\nResult: ${JSON.stringify(result, null, 2)}` }],
-        isError: false,
-      };
+    }
+
+    if (name === "snyk_add_project_tags") {
+      const parsed = AddProjectTagsArgsSchema.parse(args);
+      type AddProjectTagsPlan = { org_id: string; project_ids: string[]; tags: { key: string; value?: string }[] };
+      return await runMutationTool<AddProjectTagsPlan>({
+        action: "add_project_tags",
+        dryRun: parsed.dry_run,
+        approvalToken: parsed.approval_token,
+        bindingArgs: { org_id: parsed.org_id, project_ids: parsed.project_ids, tags: parsed.tags },
+        buildPlanData: () => ({ org_id: parsed.org_id, project_ids: parsed.project_ids, tags: parsed.tags }),
+        describeDryRun: (data) => {
+          const totalOperations = data.project_ids.length * data.tags.length;
+          return `Dry run – will add ${data.tags.length} tag(s) to ${data.project_ids.length} project(s) (${totalOperations} operations).\n${JSON.stringify(data, null, 2)}`;
+        },
+        apply: async (data) => {
+          const safeOrgId = sanitizePathSegment(data.org_id, "org_id");
+          const results: { projectId: string; tag: { key: string; value?: string }; ok: boolean; error?: string }[] = [];
+          for (const projectId of data.project_ids) {
+            const safeProjectId = sanitizePathSegment(projectId, "project_id");
+            for (const tag of data.tags) {
+              try {
+                await v1.addProjectTag(config, safeOrgId, safeProjectId, tag.key, tag.value);
+                results.push({ projectId, tag, ok: true });
+              } catch (err) {
+                results.push({ projectId, tag, ok: false, error: String(err) });
+              }
+            }
+          }
+          return `Project tags added. Results:\n${JSON.stringify(results, null, 2)}`;
+        },
+      });
+    }
+
+    if (name === "snyk_remove_project_tags") {
+      const parsed = RemoveProjectTagsArgsSchema.parse(args);
+      type RemoveProjectTagsPlan = { org_id: string; project_ids: string[]; tag_keys: string[] };
+      return await runMutationTool<RemoveProjectTagsPlan>({
+        action: "remove_project_tags",
+        dryRun: parsed.dry_run,
+        approvalToken: parsed.approval_token,
+        bindingArgs: { org_id: parsed.org_id, project_ids: parsed.project_ids, tag_keys: parsed.tag_keys },
+        buildPlanData: () => ({ org_id: parsed.org_id, project_ids: parsed.project_ids, tag_keys: parsed.tag_keys }),
+        describeDryRun: (data) => {
+          const totalOperations = data.project_ids.length * data.tag_keys.length;
+          return `Dry run – will remove ${data.tag_keys.length} tag key(s) from ${data.project_ids.length} project(s) (${totalOperations} operations).\n${JSON.stringify(data, null, 2)}`;
+        },
+        apply: async (data) => {
+          const safeOrgId = sanitizePathSegment(data.org_id, "org_id");
+          const results: { projectId: string; key: string; ok: boolean; error?: string }[] = [];
+          for (const projectId of data.project_ids) {
+            const safeProjectId = sanitizePathSegment(projectId, "project_id");
+            for (const key of data.tag_keys) {
+              try {
+                await v1.removeProjectTag(config, safeOrgId, safeProjectId, key);
+                results.push({ projectId, key, ok: true });
+              } catch (err) {
+                results.push({ projectId, key, ok: false, error: String(err) });
+              }
+            }
+          }
+          return `Project tags removed. Results:\n${JSON.stringify(results, null, 2)}`;
+        },
+      });
     }
 
     if (name === "snyk_update_asset") {
@@ -1267,261 +743,60 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
           isError: true,
         };
       }
-      if (parsed.dry_run) {
-        const plan = {
-          action: "update_asset",
-          group_id: parsed.group_id,
-          asset_id: parsed.asset_id,
-          type: parsed.type,
+      type UpdateAssetPlan = { group_id: string; asset_id: string; type: "repository" | "image" | "package"; attributes: typeof attributes };
+      return await runMutationTool<UpdateAssetPlan>({
+        action: "update_asset",
+        dryRun: parsed.dry_run,
+        approvalToken: parsed.approval_token,
+        bindingArgs: { group_id: parsed.group_id, asset_id: parsed.asset_id, type: parsed.type, attributes },
+        buildPlanData: () => ({ group_id: parsed.group_id, asset_id: parsed.asset_id, type: parsed.type, attributes }),
+        describeDryRun: (data) =>
+          `Dry run – will update asset ${data.asset_id} in group ${data.group_id}.\n\nPlan:\n${JSON.stringify(data, null, 2)}`,
+        apply: async (data) => {
+          const result = await rest.updateAsset(config, data.group_id, data.asset_id, data.type, data.attributes);
+          return `Asset ${data.asset_id} updated.\n\nResult: ${JSON.stringify(result, null, 2)}`;
+        },
+      });
+    }
+
+    if (name === "snyk_bulk_update_inventory_assets") {
+      const parsed = BulkUpdateInventoryAssetsArgsSchema.parse(args);
+      const items = parsed.updates.map((u) => {
+        const attributes: { class?: string; labels?: string[]; tags?: Record<string, string> } = {};
+        if (u.class !== undefined) attributes.class = u.class;
+        if (u.labels !== undefined) attributes.labels = u.labels;
+        if (u.tags !== undefined) attributes.tags = u.tags;
+        return {
+          type: "asset" as const,
+          id: sanitizePathSegment(u.asset_id, "asset_id"),
           attributes,
         };
-        const approval_token = createApproval(plan);
+      });
+      const withAttributes = items.filter((d) => Object.keys(d.attributes).length > 0);
+      if (withAttributes.length === 0) {
         return {
-          content: [{
-            type: "text",
-            text: `Dry run – will update asset ${parsed.asset_id} in group ${parsed.group_id}.\n\nPlan:\n${JSON.stringify(plan, null, 2)}\n\nTo apply, call snyk_update_asset with dry_run=false and approval_token="${approval_token}"`,
-          }],
-          isError: false,
+          content: [{ type: "text", text: "Each update must specify at least one of: class, labels, or tags." }],
+          isError: true,
         };
       }
-      const plan = consumeApproval(parsed.approval_token ?? "");
-      if (!plan || (plan as { action?: string }).action !== "update_asset") {
-        return { content: [{ type: "text", text: "Invalid or expired approval_token. Run with dry_run=true first." }], isError: true };
-      }
-      const p = plan as { group_id: string; asset_id: string; type: "repository" | "image" | "package"; attributes: typeof attributes };
-      const result = await rest.updateAsset(config, p.group_id, p.asset_id, p.type, p.attributes);
-      return {
-        content: [{ type: "text", text: `Asset ${p.asset_id} updated.\n\nResult: ${JSON.stringify(result, null, 2)}` }],
-        isError: false,
-      };
-    }
-
-    if (name === "snyk_add_repository_alias") {
-      const parsed = AddRepositoryAliasArgsSchema.parse(args);
-      const { scope, id } = resolveAssetScope(parsed.group_id, parsed.org_id);
-      if (parsed.dry_run) {
-        const plan = {
-          action: "add_repository_alias",
-          scope,
-          scope_id: id,
-          aliases: parsed.aliases,
-        };
-        const approval_token = createApproval(plan);
-        return {
-          content: [{
-            type: "text",
-            text: `Dry run – will add ${parsed.aliases.length} repository alias(es) to ${scope} ${id}.\n\nPlan:\n${JSON.stringify(plan, null, 2)}\n\nTo apply, call snyk_add_repository_alias with dry_run=false and approval_token="${approval_token}"`,
-          }],
-          isError: false,
-        };
-      }
-      const plan = consumeApproval(parsed.approval_token ?? "");
-      if (!plan || (plan as { action?: string }).action !== "add_repository_alias") {
-        return { content: [{ type: "text", text: "Invalid or expired approval_token. Run with dry_run=true first." }], isError: true };
-      }
-      const p = plan as { scope: "groups" | "orgs"; scope_id: string; aliases: { url: string; new_url: string }[] };
-      const result = await rest.addRepositoryAliases(config, p.scope, p.scope_id, p.aliases);
-      return {
-        content: [{ type: "text", text: `Added ${p.aliases.length} repository alias(es) to ${p.scope} ${p.scope_id}.\n\nResult: ${JSON.stringify(result, null, 2)}` }],
-        isError: false,
-      };
-    }
-
-    if (name === "snyk_remove_repository_alias") {
-      const parsed = RemoveRepositoryAliasArgsSchema.parse(args);
-      const { scope, id } = resolveAssetScope(parsed.group_id, parsed.org_id);
-      if (parsed.dry_run) {
-        const plan = {
-          action: "remove_repository_alias",
-          scope,
-          scope_id: id,
-          aliases: parsed.aliases,
-        };
-        const approval_token = createApproval(plan);
-        return {
-          content: [{
-            type: "text",
-            text: `Dry run – will remove ${parsed.aliases.length} repository alias(es) from ${scope} ${id}.\n\nPlan:\n${JSON.stringify(plan, null, 2)}\n\nTo apply, call snyk_remove_repository_alias with dry_run=false and approval_token="${approval_token}"`,
-          }],
-          isError: false,
-        };
-      }
-      const plan = consumeApproval(parsed.approval_token ?? "");
-      if (!plan || (plan as { action?: string }).action !== "remove_repository_alias") {
-        return { content: [{ type: "text", text: "Invalid or expired approval_token. Run with dry_run=true first." }], isError: true };
-      }
-      const p = plan as { scope: "groups" | "orgs"; scope_id: string; aliases: { id: string; url: string; new_url: string }[] };
-      const result = await rest.removeRepositoryAliases(config, p.scope, p.scope_id, p.aliases);
-      return {
-        content: [{ type: "text", text: `Removed ${p.aliases.length} repository alias(es) from ${p.scope} ${p.scope_id}.\n\nResult: ${JSON.stringify(result, null, 2)}` }],
-        isError: false,
-      };
-    }
-
-    if (name === "snyk_list_inventory_assets") {
-      const parsed = ListInventoryAssetsArgsSchema.parse(args);
-      const { scope, id } = resolveInventoryScope(parsed.tenant_id, parsed.org_id, parsed.group_id);
-      const data = await rest.listInventoryAssets(config, scope, id, {
-        filter: parsed.filter,
-        sort: parsed.sort,
-        fields: parsed.fields,
-        meta_count: parsed.meta_count,
-        limit: parsed.limit,
-        starting_after: parsed.starting_after,
-        ending_before: parsed.ending_before,
+      const requestBody = { data: withAttributes };
+      type BulkUpdateInventoryPlan = { org_id: string; updates: typeof parsed.updates; request_body: typeof requestBody };
+      return await runMutationTool<BulkUpdateInventoryPlan>({
+        action: "bulk_update_inventory_assets",
+        dryRun: parsed.dry_run,
+        approvalToken: parsed.approval_token,
+        bindingArgs: { org_id: parsed.org_id, updates: parsed.updates },
+        buildPlanData: () => ({ org_id: parsed.org_id, updates: parsed.updates, request_body: requestBody }),
+        describeDryRun: async (data) => {
+          const orgLabel = await formatOrgId(config, data.org_id);
+          return `Dry run – will bulk update ${data.updates.length} inventory asset(s) in ${orgLabel}.\n\nPlan:\n${JSON.stringify(data, null, 2)}`;
+        },
+        apply: async (data) => {
+          const result = await rest.bulkUpdateInventoryAssets(config, sanitizePathSegment(data.org_id, "org_id"), data.request_body);
+          const doneLabel = await formatOrgId(config, data.org_id);
+          return `Bulk inventory assets updated in ${doneLabel}.\n\nResult: ${JSON.stringify(result, null, 2)}`;
+        },
       });
-      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }], isError: false };
-    }
-
-    if (name === "snyk_get_inventory_asset") {
-      const parsed = GetInventoryAssetArgsSchema.parse(args);
-      const { scope, id } = resolveInventoryScope(parsed.tenant_id, parsed.org_id, parsed.group_id);
-      const data = await rest.getInventoryAsset(config, scope, id, parsed.asset_id, { fields: parsed.fields });
-      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }], isError: false };
-    }
-
-    if (name === "snyk_update_inventory_asset") {
-      const parsed = UpdateInventoryAssetArgsSchema.parse(args);
-      const { scope, id } = resolveInventoryScope(parsed.tenant_id, parsed.org_id, parsed.group_id);
-      const attributes: rest.InventoryAssetAttributes = {};
-      if (parsed.class !== undefined) attributes.class = parsed.class;
-      if (parsed.labels !== undefined) attributes.labels = parsed.labels;
-      if (parsed.tags !== undefined) attributes.tags = parsed.tags;
-      if (Object.keys(attributes).length === 0) {
-        return { content: [{ type: "text", text: "Provide at least one of: class, labels, or tags to update." }], isError: true };
-      }
-      if (parsed.dry_run) {
-        const plan = {
-          action: "update_inventory_asset",
-          scope,
-          scope_id: id,
-          asset_id: parsed.asset_id,
-          type: parsed.type,
-          attributes,
-        };
-        const approval_token = createApproval(plan);
-        return {
-          content: [{
-            type: "text",
-            text: `Dry run – will update inventory asset ${parsed.asset_id} in ${scope} ${id}.\n\nPlan:\n${JSON.stringify(plan, null, 2)}\n\nTo apply, call snyk_update_inventory_asset with dry_run=false and approval_token="${approval_token}"`,
-          }],
-          isError: false,
-        };
-      }
-      const plan = consumeApproval(parsed.approval_token ?? "");
-      if (!plan || (plan as { action?: string }).action !== "update_inventory_asset") {
-        return { content: [{ type: "text", text: "Invalid or expired approval_token. Run with dry_run=true first." }], isError: true };
-      }
-      const p = plan as { scope: rest.InventoryScope; scope_id: string; asset_id: string; type: string; attributes: rest.InventoryAssetAttributes };
-      const result = await rest.updateInventoryAsset(config, p.scope, p.scope_id, p.asset_id, p.type, p.attributes);
-      return {
-        content: [{ type: "text", text: `Inventory asset ${p.asset_id} updated.\n\nResult: ${JSON.stringify(result, null, 2)}` }],
-        isError: false,
-      };
-    }
-
-    if (name === "snyk_list_inventory_asset_projects") {
-      const parsed = ListInventoryAssetProjectsArgsSchema.parse(args);
-      const { scope, id } = resolveInventoryScope(parsed.tenant_id, parsed.org_id, parsed.group_id);
-      const data = await rest.listInventoryAssetProjects(config, scope, id, parsed.asset_id, {
-        canonical: parsed.canonical,
-        target_id: parsed.target_id,
-        sort: parsed.sort,
-        limit: parsed.limit,
-        starting_after: parsed.starting_after,
-        ending_before: parsed.ending_before,
-      });
-      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }], isError: false };
-    }
-
-    if (name === "snyk_list_inventory_asset_targets") {
-      const parsed = ListInventoryAssetTargetsArgsSchema.parse(args);
-      const { scope, id } = resolveInventoryScope(parsed.tenant_id, parsed.org_id, parsed.group_id);
-      const data = await rest.listInventoryAssetTargets(config, scope, id, parsed.asset_id, {
-        limit: parsed.limit,
-        starting_after: parsed.starting_after,
-        ending_before: parsed.ending_before,
-      });
-      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }], isError: false };
-    }
-
-    if (name === "snyk_create_inventory_asset_search") {
-      const parsed = CreateInventoryAssetSearchArgsSchema.parse(args);
-      const { scope, id } = resolveInventoryScope(parsed.tenant_id, parsed.org_id, parsed.group_id);
-      const data = await rest.createInventoryAssetSearch(config, scope, id, {
-        filter: parsed.filter,
-        sort: parsed.sort,
-        meta_count: parsed.meta_count,
-        limit: parsed.limit,
-      });
-      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }], isError: false };
-    }
-
-    if (name === "snyk_get_inventory_asset_search_results") {
-      const parsed = GetInventoryAssetSearchResultsArgsSchema.parse(args);
-      const { scope, id } = resolveInventoryScope(parsed.tenant_id, parsed.org_id, parsed.group_id);
-      const data = await rest.getInventoryAssetSearchResults(config, scope, id, parsed.search_id, {
-        sort: parsed.sort,
-        fields: parsed.fields,
-        limit: parsed.limit,
-        starting_after: parsed.starting_after,
-        ending_before: parsed.ending_before,
-      });
-      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }], isError: false };
-    }
-
-    if (name === "snyk_list_inventory_asset_filters") {
-      const parsed = ListInventoryAssetFiltersArgsSchema.parse(args);
-      const { scope, id } = resolveInventoryScope(parsed.tenant_id, parsed.org_id, parsed.group_id);
-      const data = await rest.listInventoryAssetFilters(config, scope, id, {
-        asset_types: parsed.asset_types,
-        limit: parsed.limit,
-        starting_after: parsed.starting_after,
-        ending_before: parsed.ending_before,
-      });
-      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }], isError: false };
-    }
-
-    if (name === "snyk_get_inventory_asset_filter_values") {
-      const parsed = GetInventoryAssetFilterValuesArgsSchema.parse(args);
-      const { scope, id } = resolveInventoryScope(parsed.tenant_id, parsed.org_id, parsed.group_id);
-      const data = await rest.getInventoryAssetFilterValues(config, scope, id, parsed.filter_id, {
-        q: parsed.q,
-        key: parsed.key,
-        keys_only: parsed.keys_only,
-        limit: parsed.limit,
-        starting_after: parsed.starting_after,
-        ending_before: parsed.ending_before,
-      });
-      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }], isError: false };
-    }
-
-    if (name === "snyk_list_inventory_asset_groups") {
-      const parsed = ListInventoryAssetGroupsArgsSchema.parse(args);
-      const { scope, id } = resolveInventoryScope(parsed.tenant_id, parsed.org_id, parsed.group_id);
-      const data = await rest.listInventoryAssetGroups(config, scope, id, {
-        asset_types: parsed.asset_types,
-        limit: parsed.limit,
-        starting_after: parsed.starting_after,
-        ending_before: parsed.ending_before,
-      });
-      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }], isError: false };
-    }
-
-    if (name === "snyk_get_inventory_asset_group_values") {
-      const parsed = GetInventoryAssetGroupValuesArgsSchema.parse(args);
-      const { scope, id } = resolveInventoryScope(parsed.tenant_id, parsed.org_id, parsed.group_id);
-      const data = await rest.getInventoryAssetGroupValues(config, scope, id, parsed.group_field_id, {
-        asset_types: parsed.asset_types,
-        filter: parsed.filter,
-        sort: parsed.sort,
-        meta_fields: parsed.meta_fields,
-        aggregate: parsed.aggregate,
-        limit: parsed.limit,
-        starting_after: parsed.starting_after,
-        ending_before: parsed.ending_before,
-      });
-      return { content: [{ type: "text", text: JSON.stringify(data, null, 2) }], isError: false };
     }
 
     return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
@@ -1531,6 +806,11 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       isError: true,
     };
   }
+}
+
+server.setRequestHandler(CallToolRequestSchema, async (request) => {
+  const result = await handleToolCall(request);
+  return { content: result.content, isError: result.isError };
 });
 
 async function main() {

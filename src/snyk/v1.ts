@@ -129,7 +129,7 @@ export async function addProjectTag(
   return res.json();
 }
 
-/** Remove tag from project (V1) */
+/** Remove tag from project (V1). */
 export async function removeProjectTag(
   config: SnykApiConfig,
   orgId: string,
