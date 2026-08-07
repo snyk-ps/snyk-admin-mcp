@@ -225,29 +225,3 @@ export async function updateAsset(
   if (!res.ok) throw new Error(`REST updateAsset failed: ${res.status} ${await res.text()}`);
   return res.json() as Promise<Record<string, unknown>>;
 }
-
-// ---------------------------------------------------------------------------
-// Inventory Assets API (Early Access). Only the bulk-update endpoint is kept —
-// it's the one genuine server-side bulk labeling operation across the tools
-// this server exposes (the Asset API above only updates one asset per call,
-// and V1 project tags has no bulk endpoint at all). The rest of the Inventory
-// Assets API surface (list/get/relationships/search/filters/groups, tenant and
-// group scoping) was intentionally dropped as redundant with the Asset API.
-// Docs: https://docs.snyk.io/developer-tools/snyk-api/reference/inventory-assets
-// ---------------------------------------------------------------------------
-
-/** Bulk update inventory assets (Early Access). PATCH /orgs/{org_id}/inventory/assets. Body: JSON:API data array with type "asset", id, and attributes (class, labels, tags). */
-export async function bulkUpdateInventoryAssets(
-  config: SnykApiConfig,
-  orgId: string,
-  body: { data: Array<{ type: string; id: string; attributes: { class?: string; labels?: string[]; tags?: Record<string, string> } }> }
-): Promise<Record<string, unknown>> {
-  const safeOrgId = sanitizePathSegment(orgId, "org_id");
-  const res = await restFetch(config, `/orgs/${safeOrgId}/inventory/assets`, {
-    method: "PATCH",
-    body: JSON.stringify(body),
-    version: ASSET_API_VERSION,
-  });
-  if (!res.ok) throw new Error(`REST bulkUpdateInventoryAssets failed: ${res.status} ${await res.text()}`);
-  return res.json() as Promise<Record<string, unknown>>;
-}

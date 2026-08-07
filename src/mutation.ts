@@ -1,4 +1,4 @@
-import { createApproval, consumeApproval } from "./approval.js";
+import { createApproval, peekApproval, discardApproval } from "./approval.js";
 
 export interface ToolResult {
   content: { type: "text"; text: string }[];
@@ -63,7 +63,8 @@ export async function runMutationTool<TData>(opts: {
     };
   }
 
-  const stored = consumeApproval(opts.approvalToken ?? "") as MutationPlan<TData> | null;
+  const token = opts.approvalToken ?? "";
+  const stored = peekApproval(token) as MutationPlan<TData> | null;
   if (!stored || stored.action !== opts.action) {
     return { content: [{ type: "text", text: "Invalid or expired approval_token. Run with dry_run=true first." }], isError: true };
   }
@@ -71,11 +72,13 @@ export async function runMutationTool<TData>(opts: {
     return {
       content: [{
         type: "text",
-        text: "Arguments no longer match the approved plan (they changed since the dry run). Run with dry_run=true again to generate a fresh plan.",
+        text: "Arguments do not match the approved plan. Re-send the exact arguments from the dry run, or run with dry_run=true again to generate a fresh plan.",
       }],
       isError: true,
     };
   }
+  // Consumed before applying so a client retry cannot execute the mutation twice.
+  discardApproval(token);
   const text = await opts.apply(stored.data);
   return { content: [{ type: "text", text }], isError: false };
 }

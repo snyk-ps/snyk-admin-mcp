@@ -21,11 +21,23 @@ export function createApproval(plan: unknown): string {
   return id;
 }
 
-export function consumeApproval(approvalToken: string): unknown {
+/**
+ * Look up a pending approval without consuming it, so a rejected apply (wrong tool,
+ * changed arguments) leaves the token usable for a corrected retry. Expired tokens are
+ * dropped and reported as missing. Call discardApproval once the plan is accepted.
+ */
+export function peekApproval(approvalToken: string): unknown {
   prune();
   const p = store.get(approvalToken);
   if (!p) return null;
-  store.delete(approvalToken);
-  if (Date.now() - p.createdAt > TTL_MS) return null;
+  if (Date.now() - p.createdAt > TTL_MS) {
+    store.delete(approvalToken);
+    return null;
+  }
   return p.plan;
+}
+
+/** Consume a pending approval, enforcing single use. */
+export function discardApproval(approvalToken: string): void {
+  store.delete(approvalToken);
 }

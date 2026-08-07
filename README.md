@@ -8,7 +8,7 @@ MCP server for managing the Snyk platform as a customer with group admin permiss
 - **Clone integration** – Clone an integration (with settings and credentials) from one org to another.
 - **Create organization** – Create a new org, optionally copying settings from a template org.
 - **Project tags** – Add or remove tags on many projects in one go.
-- **Asset labeling** – Search, look up, and label assets (class/labels/tags) — one at a time, or many at once.
+- **Asset labeling** – Search, look up, and label assets (class/labels/tags) — one at a time, or many at once. Covers repository, image, and package assets.
 - **Dry run + approval** – Every mutation supports `dry_run=true` (default) to preview a plan first. Apply with `dry_run=false` and the `approval_token` returned from the dry run. Tokens expire after 10 minutes.
 
 ## Setup
@@ -91,8 +91,25 @@ Some clients differ in config file location or key name (for example, VS Code's 
 | `snyk_get_asset` | Get a single asset by ID within a group. Read-only. |
 | `snyk_list_asset_projects` | List projects related to an asset, with cursor pagination. Read-only. |
 | `snyk_list_related_assets` | List assets related to an asset, with optional type filter and pagination. Read-only. |
-| `snyk_update_asset` | Update one asset's class, labels, and/or tags. Dry run / approval flow. |
-| `snyk_bulk_update_inventory_assets` | Update class/labels/tags for many assets in a single request. Dry run / approval flow. |
+| `snyk_update_assets` | Update class, labels, and/or tags on one or more assets (repos included). One request per asset. Dry run / approval flow. |
+
+## Notes
+
+- **Asset labels vs. tags** – an asset's `labels` are a flat list of strings; its `tags` are key/value pairs. `snyk_update_assets` takes `add`/`remove` for both, so existing values are preserved unless you remove them explicitly.
+- **The API cannot tell you where a label came from** – the Asset API documents `labels` as "unstructured, simple text strings", and the response carries no per-label provenance: a label you typed, one applied by an asset policy, and one Snyk generated are byte-identical in the payload. The Snyk UI distinguishes them; the API does not. The only reliable signal is that Snyk mirrors every detected language into `labels`, so:
+
+  ```
+  language labels = labels ∩ keys(languages)
+  everything else = your labels (manual or asset-policy) + any Snyk-internal labels
+  ```
+
+  Verified across a 29-repository group: every `languages` key appeared in `labels`, with no exceptions. Two caveats on the remainder. Labels applied by an **asset policy** (Policies → Assets) are custom labels and show as such in the UI — for example an `archived` label set by a policy, which does *not* track the separate `archived` boolean attribute. And the API can return **internal labels the UI never displays**: `new repository` shows up in `labels` on recently-created repos but is not a label in the UI, so treat unexpected values as suspect rather than assuming they are yours. If you need true provenance, list the group's asset policies (`GET /groups/{group_id}/policies`) and match on the label values their actions apply; note that disabling such a policy removes its labels from the matched assets.
+- **Project tags are not asset labels** – `snyk_add_project_tags` / `snyk_remove_project_tags` operate on Snyk *projects* via the V1 API. To label an asset (a repo, image, or package), use `snyk_update_assets`.
+- **There is no batch asset endpoint** – `snyk_update_assets` accepts a list of `asset_ids`, but the Asset API only updates one asset per call, so the server issues one PATCH per asset (concurrently, within the rate limit) and reports per-asset success/failure. It is not atomic: a partial failure leaves earlier assets updated. The same applies to the project tag tools, which make one V1 call per project × tag.
+- **`snyk_copy_org_settings` is narrow** – only fields editable through `PUT /v1/org/{orgId}/settings` are copied (for example `requestAccess`). Integrations, SCM tokens, and SSO are not affected; use `snyk_clone_integration` for integrations.
+- **CLI integrations cannot be cloned** – `snyk_clone_integration` rejects them; exclude the CLI integration when copying integrations between orgs.
+- **Asset tools are group-scoped** – pass a `group_id` (a group UUID), not an org ID. `snyk_list_orgs` returns each org's `group_id`.
+- **Rate limits** – requests are throttled to ~90% of Snyk's published limits (REST 1620/min, V1 2000/min) with automatic retry on 429.
 
 ## Workflow (mutations)
 

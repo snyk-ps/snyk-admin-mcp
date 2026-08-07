@@ -99,7 +99,7 @@ const CreateOrganizationArgsSchema = z.object({
   approval_token: z.string().optional(),
 });
 
-// --- Asset API (Early Access): search, get, relationships, update, aliases ---
+// --- Asset API (Early Access): search, get, relationships, update ---
 
 /** Recursive filter node for asset search. */
 type AssetSearchAttributesInput = {
@@ -145,10 +145,11 @@ const ListRelatedAssetsArgsSchema = z.object({
   ending_before: z.string().optional(),
 });
 
-const UpdateAssetArgsSchema = z.object({
-  group_id: z.string().describe("Group ID that owns the asset"),
-  asset_id: z.string().describe("Asset ID (UUID)"),
-  type: z.enum(["repository", "image", "package"]).describe("Asset type"),
+// --- Update assets (Asset API). The API has no batch endpoint: one PATCH per asset. ---
+const UpdateAssetsArgsSchema = z.object({
+  group_id: z.string().describe("Group ID that owns the assets"),
+  asset_ids: z.array(z.string()).min(1).max(200).describe("One or more asset IDs (get these from snyk_search_assets)"),
+  type: z.enum(["repository", "image", "package"]).default("repository").describe("Asset type — all asset_ids must be of this type"),
   class: z.object({
     display_name: z.enum(["A", "B", "C", "D"]).optional(),
     rank: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4)]).optional(),
@@ -157,24 +158,11 @@ const UpdateAssetArgsSchema = z.object({
   labels: z.object({
     add: z.array(z.string()).optional(),
     remove: z.array(z.string()).optional(),
-  }).optional().describe("Labels to add/remove."),
+  }).optional().describe("Labels to add/remove on every listed asset."),
   tags: z.object({
     add: z.record(z.string(), z.string()).optional(),
     remove: z.array(z.string()).optional(),
-  }).optional().describe("Tag key-value pairs to add, and tag keys to remove."),
-  dry_run: z.boolean().default(true),
-  approval_token: z.string().optional(),
-});
-
-// --- Bulk update inventory assets (REST Inventory Assets API — bulk endpoint only) ---
-const BulkUpdateInventoryAssetsArgsSchema = z.object({
-  org_id: z.string().describe("Organization ID"),
-  updates: z.array(z.object({
-    asset_id: z.string().describe("Inventory asset ID to update"),
-    class: z.string().optional().describe("Asset classification"),
-    labels: z.array(z.string()).optional().describe("Free-form labels"),
-    tags: z.record(z.string(), z.string()).optional().describe("Structured key:value tags"),
-  })).min(1).describe("List of asset updates (each can set class, labels, and/or tags)"),
+  }).optional().describe("Tag key-value pairs to add, and tag keys to remove, on every listed asset."),
   dry_run: z.boolean().default(true),
   approval_token: z.string().optional(),
 });
@@ -212,7 +200,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     },
     {
       name: "snyk_add_project_tags",
-      description: "Add tags to multiple projects (one V1 API call per project x tag, not a single batch request). Uses Snyk V1 API (project tags). Note: these are project tags, not asset labels — use snyk_update_asset for asset labels. Use dry_run=true first to see the plan, then dry_run=false with approval_token to apply.",
+      description: "Add tags to multiple projects (one V1 API call per project x tag, not a single batch request). Uses Snyk V1 API (project tags). Note: these are project tags, not asset labels — use snyk_update_assets for asset labels. Use dry_run=true first to see the plan, then dry_run=false with approval_token to apply.",
       inputSchema: {
         type: "object",
         properties: {
@@ -372,14 +360,20 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
       },
     },
     {
-      name: "snyk_update_asset",
-      description: "Update an asset's class, labels, and/or tags (REST Asset API, Early Access). PATCH /groups/{group_id}/assets/{asset_id}. Use dry_run=true first, then dry_run=false with approval_token to apply.",
+      name: "snyk_update_assets",
+      description: "Update class, labels, and/or tags on one or more assets (REST Asset API, Early Access). Issues one PATCH per asset — the Asset API has no batch endpoint — and reports per-asset success/failure, so a partial failure leaves earlier assets updated. Works for repository, image, and package assets; pass a single ID in asset_ids to update just one. Get asset_ids from snyk_search_assets. Use dry_run=true first, then dry_run=false with approval_token to apply.",
       inputSchema: {
         type: "object",
         properties: {
-          group_id: { type: "string", description: "Group ID that owns the asset" },
-          asset_id: { type: "string", description: "Asset ID (UUID)" },
-          type: { type: "string", enum: ["repository", "image", "package"], description: "Asset type" },
+          group_id: { type: "string", description: "Group ID that owns the assets" },
+          asset_ids: {
+            type: "array",
+            minItems: 1,
+            maxItems: 200,
+            items: { type: "string" },
+            description: "One or more asset IDs (get these from snyk_search_assets)",
+          },
+          type: { type: "string", enum: ["repository", "image", "package"], default: "repository", description: "Asset type — all asset_ids must be of this type" },
           class: {
             type: "object",
             description: "Set asset class by display_name (A-D) or rank (1-4). If both given, rank wins.",
@@ -395,7 +389,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
               add: { type: "array", items: { type: "string" } },
               remove: { type: "array", items: { type: "string" } },
             },
-            description: "Labels to add/remove",
+            description: "Labels to add/remove on every listed asset",
           },
           tags: {
             type: "object",
@@ -403,39 +397,12 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
               add: { type: "object", additionalProperties: { type: "string" }, description: "Tag key-value pairs to add" },
               remove: { type: "array", items: { type: "string" }, description: "Tag keys to remove" },
             },
-            description: "Tags to add/remove",
+            description: "Tags to add/remove on every listed asset",
           },
           dry_run: { type: "boolean", default: true },
           approval_token: { type: "string" },
         },
-        required: ["group_id", "asset_id", "type"],
-      },
-    },
-    {
-      name: "snyk_bulk_update_inventory_assets",
-      description: "Bulk update inventory assets (class, labels, tags) using the REST Inventory Assets API's bulk endpoint (PATCH /orgs/{org_id}/inventory/assets) — the only bulk (multi-asset, single-request) labeling operation this server exposes; snyk_update_asset only updates one asset per call. Use dry_run=true first, then dry_run=false with approval_token to apply.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          org_id: { type: "string", description: "Organization ID" },
-          updates: {
-            type: "array",
-            items: {
-              type: "object",
-              properties: {
-                asset_id: { type: "string", description: "Inventory asset ID to update" },
-                class: { type: "string", description: "Asset classification" },
-                labels: { type: "array", items: { type: "string" }, description: "Free-form labels" },
-                tags: { type: "object", additionalProperties: { type: "string" }, description: "Structured key:value tags" },
-              },
-              required: ["asset_id"],
-            },
-            description: "List of asset updates",
-          },
-          dry_run: { type: "boolean", default: true },
-          approval_token: { type: "string" },
-        },
-        required: ["org_id", "updates"],
+        required: ["group_id", "asset_ids"],
       },
     },
   ],
@@ -727,8 +694,8 @@ async function handleToolCall(request: CallToolRequest): Promise<ToolResult> {
       });
     }
 
-    if (name === "snyk_update_asset") {
-      const parsed = UpdateAssetArgsSchema.parse(args);
+    if (name === "snyk_update_assets") {
+      const parsed = UpdateAssetsArgsSchema.parse(args);
       const attributes: {
         class?: { display_name?: "A" | "B" | "C" | "D"; rank?: 1 | 2 | 3 | 4; locked?: boolean };
         labels?: { add?: string[]; remove?: string[] };
@@ -743,58 +710,42 @@ async function handleToolCall(request: CallToolRequest): Promise<ToolResult> {
           isError: true,
         };
       }
-      type UpdateAssetPlan = { group_id: string; asset_id: string; type: "repository" | "image" | "package"; attributes: typeof attributes };
-      return await runMutationTool<UpdateAssetPlan>({
-        action: "update_asset",
+      type UpdateAssetsPlan = {
+        group_id: string;
+        asset_ids: string[];
+        type: "repository" | "image" | "package";
+        attributes: typeof attributes;
+      };
+      return await runMutationTool<UpdateAssetsPlan>({
+        action: "update_assets",
         dryRun: parsed.dry_run,
         approvalToken: parsed.approval_token,
-        bindingArgs: { group_id: parsed.group_id, asset_id: parsed.asset_id, type: parsed.type, attributes },
-        buildPlanData: () => ({ group_id: parsed.group_id, asset_id: parsed.asset_id, type: parsed.type, attributes }),
-        describeDryRun: (data) =>
-          `Dry run – will update asset ${data.asset_id} in group ${data.group_id}.\n\nPlan:\n${JSON.stringify(data, null, 2)}`,
-        apply: async (data) => {
-          const result = await rest.updateAsset(config, data.group_id, data.asset_id, data.type, data.attributes);
-          return `Asset ${data.asset_id} updated.\n\nResult: ${JSON.stringify(result, null, 2)}`;
-        },
-      });
-    }
-
-    if (name === "snyk_bulk_update_inventory_assets") {
-      const parsed = BulkUpdateInventoryAssetsArgsSchema.parse(args);
-      const items = parsed.updates.map((u) => {
-        const attributes: { class?: string; labels?: string[]; tags?: Record<string, string> } = {};
-        if (u.class !== undefined) attributes.class = u.class;
-        if (u.labels !== undefined) attributes.labels = u.labels;
-        if (u.tags !== undefined) attributes.tags = u.tags;
-        return {
-          type: "asset" as const,
-          id: sanitizePathSegment(u.asset_id, "asset_id"),
-          attributes,
-        };
-      });
-      const withAttributes = items.filter((d) => Object.keys(d.attributes).length > 0);
-      if (withAttributes.length === 0) {
-        return {
-          content: [{ type: "text", text: "Each update must specify at least one of: class, labels, or tags." }],
-          isError: true,
-        };
-      }
-      const requestBody = { data: withAttributes };
-      type BulkUpdateInventoryPlan = { org_id: string; updates: typeof parsed.updates; request_body: typeof requestBody };
-      return await runMutationTool<BulkUpdateInventoryPlan>({
-        action: "bulk_update_inventory_assets",
-        dryRun: parsed.dry_run,
-        approvalToken: parsed.approval_token,
-        bindingArgs: { org_id: parsed.org_id, updates: parsed.updates },
-        buildPlanData: () => ({ org_id: parsed.org_id, updates: parsed.updates, request_body: requestBody }),
-        describeDryRun: async (data) => {
-          const orgLabel = await formatOrgId(config, data.org_id);
-          return `Dry run – will bulk update ${data.updates.length} inventory asset(s) in ${orgLabel}.\n\nPlan:\n${JSON.stringify(data, null, 2)}`;
+        bindingArgs: { group_id: parsed.group_id, asset_ids: parsed.asset_ids, type: parsed.type, attributes },
+        buildPlanData: () => ({ group_id: parsed.group_id, asset_ids: parsed.asset_ids, type: parsed.type, attributes }),
+        describeDryRun: (data) => {
+          const count = data.asset_ids.length;
+          const scope = count === 1
+            ? `asset ${data.asset_ids[0]}`
+            : `${count} ${data.type} assets (one PATCH each)`;
+          return `Dry run – will update ${scope} in group ${data.group_id}.\n\nPlan:\n${JSON.stringify(data, null, 2)}`;
         },
         apply: async (data) => {
-          const result = await rest.bulkUpdateInventoryAssets(config, sanitizePathSegment(data.org_id, "org_id"), data.request_body);
-          const doneLabel = await formatOrgId(config, data.org_id);
-          return `Bulk inventory assets updated in ${doneLabel}.\n\nResult: ${JSON.stringify(result, null, 2)}`;
+          const results = await Promise.all(
+            data.asset_ids.map(async (assetId) => {
+              try {
+                await rest.updateAsset(config, data.group_id, assetId, data.type, data.attributes);
+                return { assetId, ok: true as const };
+              } catch (err) {
+                return { assetId, ok: false as const, error: err instanceof Error ? err.message : String(err) };
+              }
+            })
+          );
+          const succeeded = results.filter((r) => r.ok).length;
+          const failed = results.length - succeeded;
+          const summary = failed === 0
+            ? `Updated all ${succeeded} asset(s).`
+            : `Updated ${succeeded} of ${results.length} asset(s); ${failed} failed.`;
+          return `${summary}\n\nResults:\n${JSON.stringify(results, null, 2)}`;
         },
       });
     }
