@@ -171,7 +171,7 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
     {
       name: "snyk_copy_org_settings",
-      description: "Copy organization settings from a source org to a target org. Uses Snyk V1 API (org settings). Always run with dry_run=true first to get a plan and approval_token, then run with dry_run=false and approval_token to apply.",
+      description: "Copy organization settings from a source org to a target org: V1 org settings (e.g. requestAccess) via Snyk's V1 API, plus SAST settings (Snyk Code enablement/autofix), Open Source language settings, and Secrets settings (all via the REST API; Secrets settings is Early Access/beta). Always run with dry_run=true first to get a plan and approval_token, then run with dry_run=false and approval_token to apply.",
       inputSchema: {
         type: "object",
         properties: {
@@ -561,26 +561,103 @@ async function handleToolCall(request: CallToolRequest): Promise<ToolResult> {
 
     if (name === "snyk_copy_org_settings") {
       const parsed = CopySettingsArgsSchema.parse(args);
-      type CopySettingsPlan = { source_org_id: string; target_org_id: string; settings_to_apply: Record<string, unknown> };
+      type CopySettingsPlan = {
+        source_org_id: string;
+        target_org_id: string;
+        settings_to_apply: Record<string, unknown>;
+        sast_settings_to_apply: rest.SastSettingsResource;
+        language_settings_to_apply: rest.LanguageSettingsMap;
+        secrets_settings_to_apply: rest.SecretsSettingsResource;
+      };
       return await runMutationTool<CopySettingsPlan>({
         action: "copy_org_settings",
         dryRun: parsed.dry_run,
         approvalToken: parsed.approval_token,
         bindingArgs: { source_org_id: parsed.source_org_id, target_org_id: parsed.target_org_id },
-        buildPlanData: async () => ({
-          source_org_id: parsed.source_org_id,
-          target_org_id: parsed.target_org_id,
-          settings_to_apply: await v1.getOrgSettings(config, sanitizePathSegment(parsed.source_org_id, "source_org_id")),
-        }),
+        buildPlanData: async () => {
+          const safeSourceOrgId = sanitizePathSegment(parsed.source_org_id, "source_org_id");
+          const [settings_to_apply, sast_settings_to_apply, languageSettings, secrets_settings_to_apply] = await Promise.all([
+            v1.getOrgSettings(config, safeSourceOrgId),
+            rest.getSastSettings(config, safeSourceOrgId),
+            rest.getLanguageSettings(config, safeSourceOrgId),
+            rest.getSecretsSettings(config, safeSourceOrgId),
+          ]);
+          return {
+            source_org_id: parsed.source_org_id,
+            target_org_id: parsed.target_org_id,
+            settings_to_apply,
+            sast_settings_to_apply,
+            language_settings_to_apply: languageSettings.attributes.languages ?? {},
+            secrets_settings_to_apply,
+          };
+        },
         describeDryRun: async (data) => {
           const sourceLabel = await formatOrgId(config, data.source_org_id);
           const targetLabel = await formatOrgId(config, data.target_org_id);
-          return `Dry run – copy settings from ${sourceLabel} to ${targetLabel}.\n\nPlan:\n${JSON.stringify(data, null, 2)}\n\nNote: only requestAccess and similar editable fields will be applied (V1 org settings).`;
+          const configured = Object.entries(data.language_settings_to_apply)
+            .filter(([, packageManagers]) => Object.keys(packageManagers).length > 0)
+            .map(([language]) => language);
+          const emptyCount = Object.keys(data.language_settings_to_apply).length - configured.length;
+          const languageSummary = configured.length
+            ? `${configured.length} language setting(s): ${configured.join(", ")}`
+            : "no language settings";
+          const emptyNote = emptyCount ? `; ${emptyCount} language(s) skipped, nothing configured at the source` : "";
+          return `Dry run – copy settings from ${sourceLabel} to ${targetLabel} (V1 org settings + SAST settings + ${languageSummary}${emptyNote} + Secrets settings [secrets_enabled=${data.secrets_settings_to_apply.attributes.secrets_enabled}]).\n\nPlan:\n${JSON.stringify(data, null, 2)}\n\nNote: only requestAccess and similar editable fields are copied from V1 org settings; SAST, Open Source language, and Secrets settings are copied via the REST API (Secrets settings is Early Access/beta — version 2024-10-15~beta).`;
         },
         apply: async (data) => {
-          await v1.updateOrgSettings(config, sanitizePathSegment(data.target_org_id, "target_org_id"), data.settings_to_apply);
+          const safeTargetOrgId = sanitizePathSegment(data.target_org_id, "target_org_id");
+          // This writes to three separate endpoints and cannot be rolled back, so every step
+          // is attempted and reported individually — a bare throw would leave the caller
+          // unable to tell which settings actually landed on the target org.
+          const steps: { step: string; ok: boolean; skipped?: boolean; note?: string; error?: string }[] = [];
+          const record = async (step: string, run: () => Promise<unknown>) => {
+            try {
+              await run();
+              steps.push({ step, ok: true });
+            } catch (err) {
+              steps.push({ step, ok: false, error: err instanceof Error ? err.message : String(err) });
+            }
+          };
+
+          await record("org settings (V1)", () =>
+            v1.updateOrgSettings(config, safeTargetOrgId, data.settings_to_apply)
+          );
+          await record("SAST settings", () =>
+            rest.updateSastSettings(config, safeTargetOrgId, data.sast_settings_to_apply)
+          );
+          await record("Secrets settings", () =>
+            rest.updateSecretsSettings(config, safeTargetOrgId, data.secrets_settings_to_apply)
+          );
+          await Promise.all(
+            Object.entries(data.language_settings_to_apply).map(([language, packageManagers]) => {
+              // `package_managers` is a oneOf across the six per-language schemas, and an empty
+              // object matches all of them, so the API rejects `{}` with "must match exactly one
+              // schema in oneOf". An empty object also means the source org has nothing
+              // configured for that language, so there is genuinely nothing to copy.
+              if (Object.keys(packageManagers).length === 0) {
+                steps.push({
+                  step: `language settings (${language})`,
+                  ok: true,
+                  skipped: true,
+                  note: "source org has no package manager settings for this language",
+                });
+                return Promise.resolve();
+              }
+              return record(`language settings (${language})`, () =>
+                rest.updateLanguageSettings(config, safeTargetOrgId, language, packageManagers)
+              );
+            })
+          );
+
+          const failed = steps.filter((s) => !s.ok);
+          const skipped = steps.filter((s) => s.skipped);
+          const applied = steps.length - failed.length - skipped.length;
           const targetLabel = await formatOrgId(config, data.target_org_id);
-          return `Org settings copied to ${targetLabel}.`;
+          const skippedNote = skipped.length ? ` (${skipped.length} skipped — nothing configured at the source)` : "";
+          const summary = failed.length === 0
+            ? `Copied ${applied} setting group(s) to ${targetLabel}${skippedNote}.`
+            : `Copied ${applied} of ${steps.length - skipped.length} setting group(s) to ${targetLabel}${skippedNote}; ${failed.length} failed — the target org is partially configured.`;
+          return `${summary}\n\nSteps:\n${JSON.stringify(steps, null, 2)}`;
         },
       });
     }

@@ -5,6 +5,14 @@ export const REST_API_VERSION = "2024-10-15";
 /** Version for the Asset API endpoints (Early Access). Newer than the default REST version. */
 export const ASSET_API_VERSION = "2026-03-25";
 
+/**
+ * Version for the Secrets Settings endpoints. Confirmed from the OpenAPI spec
+ * (`x-snyk-api-version`): this is a `~beta` release, not the plain dated version
+ * used elsewhere — passing the default REST_API_VERSION here would request a
+ * version this beta-only resource doesn't exist under.
+ */
+export const SECRETS_SETTINGS_API_VERSION = "2024-10-15~beta";
+
 /** Sanitize ID/path segment before use in API URLs to prevent SSRF. Returns validated string. */
 export function sanitizePathSegment(value: string, label: string): string {
   if (!value || typeof value !== "string") throw new Error(`Invalid ${label}`);

@@ -3,3 +3,4 @@ dist/
 .env
 .vscode/
 NOTES.md
+Snyk API.json

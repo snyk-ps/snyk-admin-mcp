@@ -83,7 +83,7 @@ Some clients differ in config file location or key name (for example, VS Code's 
 | `snyk_list_integrations` | List integrations for an org. Read-only. |
 | `snyk_list_projects` | List projects for an org. Read-only. |
 | `snyk_create_organization` | Create a new Snyk organization. Optional: `group_id`, `source_org_id` (copy settings from a template org). Dry run / approval flow. |
-| `snyk_copy_org_settings` | Copy org settings from a source org to a target org. Dry run → plan + `approval_token`; then call again with `dry_run=false` and that token to apply. |
+| `snyk_copy_org_settings` | Copy org settings (V1), SAST settings, Open Source language settings, and Secrets settings (all REST; Secrets is Early Access/beta) from a source org to a target org. Dry run → plan + `approval_token`; then call again with `dry_run=false` and that token to apply. |
 | `snyk_clone_integration` | Clone one integration from a source org to a target org (CLI integrations excluded). Same dry run / approval flow. |
 | `snyk_add_project_tags` | Add tags to multiple projects at once. Same dry run / approval flow. |
 | `snyk_remove_project_tags` | Remove tags (by key) from multiple projects at once. Same dry run / approval flow. |
@@ -95,21 +95,13 @@ Some clients differ in config file location or key name (for example, VS Code's 
 
 ## Notes
 
-- **Asset labels vs. tags** – an asset's `labels` are a flat list of strings; its `tags` are key/value pairs. `snyk_update_assets` takes `add`/`remove` for both, so existing values are preserved unless you remove them explicitly.
-- **The API cannot tell you where a label came from** – the Asset API documents `labels` as "unstructured, simple text strings", and the response carries no per-label provenance: a label you typed, one applied by an asset policy, and one Snyk generated are byte-identical in the payload. The Snyk UI distinguishes them; the API does not. The only reliable signal is that Snyk mirrors every detected language into `labels`, so:
-
-  ```
-  language labels = labels ∩ keys(languages)
-  everything else = your labels (manual or asset-policy) + any Snyk-internal labels
-  ```
-
-  Verified across a 29-repository group: every `languages` key appeared in `labels`, with no exceptions. Two caveats on the remainder. Labels applied by an **asset policy** (Policies → Assets) are custom labels and show as such in the UI — for example an `archived` label set by a policy, which does *not* track the separate `archived` boolean attribute. And the API can return **internal labels the UI never displays**: `new repository` shows up in `labels` on recently-created repos but is not a label in the UI, so treat unexpected values as suspect rather than assuming they are yours. If you need true provenance, list the group's asset policies (`GET /groups/{group_id}/policies`) and match on the label values their actions apply; note that disabling such a policy removes its labels from the matched assets.
-- **Project tags are not asset labels** – `snyk_add_project_tags` / `snyk_remove_project_tags` operate on Snyk *projects* via the V1 API. To label an asset (a repo, image, or package), use `snyk_update_assets`.
-- **There is no batch asset endpoint** – `snyk_update_assets` accepts a list of `asset_ids`, but the Asset API only updates one asset per call, so the server issues one PATCH per asset (concurrently, within the rate limit) and reports per-asset success/failure. It is not atomic: a partial failure leaves earlier assets updated. The same applies to the project tag tools, which make one V1 call per project × tag.
-- **`snyk_copy_org_settings` is narrow** – only fields editable through `PUT /v1/org/{orgId}/settings` are copied (for example `requestAccess`). Integrations, SCM tokens, and SSO are not affected; use `snyk_clone_integration` for integrations.
-- **CLI integrations cannot be cloned** – `snyk_clone_integration` rejects them; exclude the CLI integration when copying integrations between orgs.
-- **Asset tools are group-scoped** – pass a `group_id` (a group UUID), not an org ID. `snyk_list_orgs` returns each org's `group_id`.
-- **Rate limits** – requests are throttled to ~90% of Snyk's published limits (REST 1620/min, V1 2000/min) with automatic retry on 429.
+- **Labels vs. tags** – `labels` are flat strings, `tags` are key/value pairs; `snyk_update_assets` takes `add`/`remove` for both, so existing values are preserved unless removed explicitly. The API gives no provenance for labels, but Snyk mirrors every detected language into `labels` — so a label matching a `languages` key is auto-generated (verified across a 29-repo group, no exceptions); the rest is yours, an asset policy's, or occasionally an internal label the UI never shows (e.g. `new repository`).
+- **Project tags ≠ asset labels** – `snyk_add_project_tags` / `snyk_remove_project_tags` tag *projects* via the V1 API. Use `snyk_update_assets` to label assets.
+- **No batch endpoint, not atomic** – `snyk_update_assets` and the project-tag tools each issue one API call per item (concurrently, rate-limited); a partial failure leaves earlier items updated.
+- **`snyk_copy_org_settings` copies four separate resources** – V1 org settings (only fields editable via `PUT /v1/org/{orgId}/settings`, e.g. `requestAccess`), SAST settings (Snyk Code enablement/autofix), Open Source language settings (per-ecosystem, e.g. npm/maven/pip), and Secrets settings (`secrets_enabled` — Early Access/beta) — the latter three via the REST API. Each is applied independently and reported per-step, so a failure on one (e.g. the beta Secrets endpoint) doesn't block the others; check the returned step list if the target org ends up partially configured. Integrations, SCM tokens, and SSO are still unaffected — use `snyk_clone_integration` for integrations.
+- **CLI integrations can't be cloned** – `snyk_clone_integration` rejects them.
+- **Asset tools are group-scoped** – pass `group_id`, not an org ID (`snyk_list_orgs` returns each org's `group_id`).
+- **Rate limits** – throttled to ~90% of Snyk's limits (REST 1620/min, V1 2000/min), with automatic retry on 429.
 
 ## Workflow (mutations)
 
