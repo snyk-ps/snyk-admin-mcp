@@ -1,5 +1,14 @@
 import { createApproval, peekApproval, discardApproval } from "./approval.js";
 
+/**
+ * Shared dry-run/approve/apply engine for every mutating MCP tool. index.ts's
+ * handleToolCall calls runMutationTool() once per mutating tool call instead of each
+ * tool hand-rolling its own "build plan -> stash token -> return text" / "redeem
+ * token -> apply" boilerplate. See the runMutationTool doc comment below for the
+ * approval-binding guarantee this centralizes.
+ */
+
+/** The shape every tool handler in index.ts returns — plain text content plus an error flag. */
 export interface ToolResult {
   content: { type: "text"; text: string }[];
   isError: boolean;
@@ -23,9 +32,13 @@ function requestKeyFor(bindingArgs: unknown): string {
   return JSON.stringify(canonicalize(bindingArgs));
 }
 
+/** What createApproval actually stores: which tool it's for, what it's bound to, and the payload to apply. */
 interface MutationPlan<TData> {
+  /** Matched against the calling tool's own action string, so a token from one tool can't be redeemed by another. */
   action: string;
+  /** requestKeyFor(bindingArgs) at dry-run time; re-derived and compared at apply time. */
   requestKey: string;
+  /** The tool-specific payload built by buildPlanData(), handed unchanged to apply(). */
   data: TData;
 }
 
@@ -40,6 +53,8 @@ interface MutationPlan<TData> {
  */
 export async function runMutationTool<TData>(opts: {
   action: string;
+  /** The tool's own name (e.g. "snyk_copy_org_settings"), named explicitly in the dry-run footer so the caller doesn't have to guess which tool to re-invoke. */
+  toolName: string;
   dryRun: boolean;
   approvalToken?: string;
   bindingArgs: unknown;
@@ -57,7 +72,7 @@ export async function runMutationTool<TData>(opts: {
     return {
       content: [{
         type: "text",
-        text: `${description}\n\nTo apply, call this tool again with dry_run=false and approval_token="${approval_token}"`,
+        text: `${description}\n\nTo apply, call ${opts.toolName} again with dry_run=false and approval_token="${approval_token}"`,
       }],
       isError: false,
     };

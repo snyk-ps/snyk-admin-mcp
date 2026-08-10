@@ -2,6 +2,17 @@ import { ASSET_API_VERSION, assertAllowedUrl, getBaseUrl, REST_API_VERSION, SECR
 import { fetchWithRetry, restRateLimiter } from "./rateLimit.js";
 
 /**
+ * Client for Snyk's REST API (JSON:API). Grouped by area in source order: orgs/projects,
+ * per-org settings resources used by snyk_copy_org_settings (SAST, Open Source languages,
+ * Secrets), then the Asset API used by snyk_search_assets/snyk_update_assets. Each settings
+ * function pair follows the same shape: GET returns a resource, and the corresponding update
+ * function takes that resource straight back — never hardcode a resource's `type` or `id`
+ * when a caller could instead pass through what a prior GET returned (see the SAST/Secrets
+ * settings comments below for why: the source org's `id` silently leaking into a PATCH aimed
+ * at a different org was a real bug here once already).
+ */
+
+/**
  * Snyk REST API (JSON:API). Use for: orgs, groups, projects, issues, etc.
  * Rate-limited to stay under 1620/min; retries on 429.
  * Docs: https://docs.snyk.io/snyk-api/rest-api/about-the-rest-api
@@ -30,12 +41,14 @@ export async function restFetch(
   );
 }
 
+/** One page of `GET /orgs`: the orgs themselves plus JSON:API cursor links and an optional total count. */
 export type ListOrgsResponse = {
   data: { id: string; attributes?: { name?: string; group_id?: string; slug?: string } }[];
   links?: { next?: string; prev?: string; first?: string; last?: string };
   meta?: { count?: number };
 };
 
+/** List organizations visible to the token (REST API). GET /orgs, with cursor pagination and optional filters. */
 export async function listOrgs(
   config: SnykApiConfig,
   opts: {
@@ -113,6 +126,7 @@ export async function getOrgName(config: SnykApiConfig, orgId: string): Promise<
   return name;
 }
 
+/** List projects for an org (REST API). GET /orgs/{org_id}/projects. */
 export async function listProjects(
   config: SnykApiConfig,
   orgId: string
@@ -123,7 +137,75 @@ export async function listProjects(
   return res.json() as Promise<{ data: { id: string; attributes?: { name?: string } }[] }>;
 }
 
-export type SastSettingsResource = { type: string; attributes: Record<string, unknown> };
+/** One audit log entry, per the OpenAPI spec's `AuditLogSearch.items` shape. */
+export type AuditLogEntry = {
+  created: string;
+  event: string;
+  content?: Record<string, unknown>;
+  group_id?: string;
+  org_id?: string;
+  project_id?: string;
+};
+
+/** Response shape for both audit-log search endpoints: a page of entries plus cursor links. */
+export type AuditLogSearchResponse = {
+  data: { type: string; items: AuditLogEntry[] };
+  links?: { next?: string; prev?: string; first?: string; last?: string };
+};
+
+/**
+ * Search audit logs for an org or group (REST API, JSON:API, GA/stable). GET
+ * /orgs/{org_id}/audit_logs/search or GET /groups/{group_id}/audit_logs/search — same shape
+ * either way, only the scope segment differs. Per Snyk's spec, "api.access" events are
+ * omitted from results unless explicitly requested via `events` — that's the API's own
+ * default, not something added here.
+ */
+export async function searchAuditLogs(
+  config: SnykApiConfig,
+  scope: "orgs" | "groups",
+  scopeId: string,
+  opts: {
+    from?: string;
+    to?: string;
+    events?: string[];
+    exclude_events?: string[];
+    user_id?: string;
+    project_id?: string;
+    size?: number;
+    sort_order?: "ASC" | "DESC";
+    cursor?: string;
+  } = {}
+): Promise<AuditLogSearchResponse> {
+  const safeId = sanitizePathSegment(scopeId, scope === "orgs" ? "org_id" : "group_id");
+  // Not using buildQuery here: `events`/`exclude_events` are repeated-key array params
+  // (?events=a&events=b), which buildQuery's single-value-per-key model doesn't support.
+  const search = new URLSearchParams();
+  if (opts.from) search.append("from", opts.from);
+  if (opts.to) search.append("to", opts.to);
+  for (const e of opts.events ?? []) search.append("events", e);
+  for (const e of opts.exclude_events ?? []) search.append("exclude_events", e);
+  if (opts.user_id) search.append("user_id", opts.user_id);
+  if (opts.project_id) search.append("project_id", opts.project_id);
+  if (opts.size !== undefined) search.append("size", String(opts.size));
+  if (opts.sort_order) search.append("sort_order", opts.sort_order);
+  if (opts.cursor) search.append("cursor", opts.cursor);
+  const qs = search.toString();
+  const res = await restFetch(config, `/${scope}/${safeId}/audit_logs/search${qs ? `?${qs}` : ""}`);
+  if (!res.ok) throw new Error(`REST searchAuditLogs failed: ${res.status} ${await res.text()}`);
+  return res.json() as Promise<AuditLogSearchResponse>;
+}
+
+/**
+ * The org SAST settings resource. `sast_enabled` is the only writable attribute — the PATCH
+ * schema declares it as the sole property with `additionalProperties: false`. `autofix_enabled`
+ * still appears (optional) in the GET response schema but is read-only here: that control is
+ * now Snyk Agent Fix, configured separately under Settings > Snyk Agent Fix at group or org
+ * level. Anything beyond `sast_enabled` must be dropped before PATCHing.
+ */
+export type SastSettingsResource = {
+  type: string;
+  attributes: { sast_enabled?: boolean } & Record<string, unknown>;
+};
 
 /** Get SAST settings for an org (REST API, JSON:API). GET /orgs/{org_id}/settings/sast. */
 export async function getSastSettings(config: SnykApiConfig, orgId: string): Promise<SastSettingsResource> {
@@ -145,13 +227,23 @@ export async function updateSastSettings(
   resource: SastSettingsResource
 ): Promise<SastSettingsResource> {
   const safeOrgId = sanitizePathSegment(orgId, "org_id");
+  if (typeof resource.attributes.sast_enabled !== "boolean") {
+    throw new Error("Cannot update SAST settings: source settings are missing a boolean sast_enabled");
+  }
   const res = await restFetch(config, `/orgs/${safeOrgId}/settings/sast`, {
     method: "PATCH",
-    // `id` is required by the API and must identify the org being written to. Never spread
-    // `resource` here: the object returned by getSastSettings carries the *source* org's `id`
-    // at runtime (the TS type just doesn't declare it), so spreading would silently address
-    // the wrong org. Take only `type`/`attributes` from it and set `id` from the target.
-    body: JSON.stringify({ data: { type: resource.type, id: safeOrgId, attributes: resource.attributes } }),
+    // Build the body field by field rather than echoing the GET response. Two separate traps:
+    // `id` is required and must be the *target* org (the fetched object carries the source
+    // org's id at runtime even though the TS type omits it), and the PATCH schema accepts only
+    // `sast_enabled` with `additionalProperties: false` — forwarding a read-only attribute such
+    // as `autofix_enabled` would 400 on any org whose GET returns it.
+    body: JSON.stringify({
+      data: {
+        type: resource.type,
+        id: safeOrgId,
+        attributes: { sast_enabled: resource.attributes.sast_enabled },
+      },
+    }),
   });
   if (!res.ok) throw new Error(`REST updateSastSettings failed: ${res.status} ${await res.text()}`);
   const body = (await res.json()) as { data: SastSettingsResource };
@@ -163,8 +255,7 @@ export async function updateSastSettings(
  * Looking a caller-supplied value up against this allowlist yields a trusted literal,
  * so nothing caller-influenced can reach the URL path (SSRF guard).
  */
-export const OPEN_SOURCE_LANGUAGES = ["javascript", "python", "dotnet", "php", "golang", "java"] as const;
-export type OpenSourceLanguage = (typeof OPEN_SOURCE_LANGUAGES)[number];
+const OPEN_SOURCE_LANGUAGES = ["javascript", "python", "dotnet", "php", "golang", "java"] as const;
 
 /** Per-language package-manager settings, keyed by language (e.g. `{ javascript: { npm: {...} } }`). */
 export type LanguageSettingsMap = Record<string, Record<string, unknown>>;
@@ -222,8 +313,15 @@ export async function updateLanguageSettings(
 /**
  * A SecretsEnablement resource, per Snyk's OpenAPI spec (`components.schemas.SecretsEnablement`):
  * `{ type, id: <org_id>, attributes: { secrets_enabled: boolean } }`. Early Access / beta.
+ * `attributes` is typed loosely (`secrets_enabled` optional, plus an escape hatch for
+ * unknown fields) rather than trusting the spec's `additionalProperties: false` to hold at
+ * runtime — the same assumption for SAST settings' GET response didn't (see updateSastSettings).
  */
-export type SecretsSettingsResource = { id: string; type: string; attributes: { secrets_enabled: boolean } };
+export type SecretsSettingsResource = {
+  id: string;
+  type: string;
+  attributes: { secrets_enabled?: boolean } & Record<string, unknown>;
+};
 
 /**
  * Get Secrets settings for an org (REST API, JSON:API, Early Access/beta).
@@ -250,10 +348,24 @@ export async function updateSecretsSettings(
   resource: SecretsSettingsResource
 ): Promise<SecretsSettingsResource> {
   const safeOrgId = sanitizePathSegment(orgId, "org_id");
+  if (typeof resource.attributes.secrets_enabled !== "boolean") {
+    throw new Error("Cannot update Secrets settings: source settings are missing a boolean secrets_enabled");
+  }
   const res = await restFetch(config, `/orgs/${safeOrgId}/settings/secrets`, {
     method: "PATCH",
     version: SECRETS_SETTINGS_API_VERSION,
-    body: JSON.stringify({ data: { id: safeOrgId, type: resource.type, attributes: resource.attributes } }),
+    // Build the body field by field rather than echoing the GET response — same precaution
+    // already proven necessary for SAST settings: `id` must be the *target* org (the fetched
+    // object carries the source org's id at runtime even though it shouldn't be relied on),
+    // and only `secrets_enabled` is forwarded, so any other field a live GET happens to
+    // return can't ride along into a PATCH the way `autofix_enabled` did for SAST.
+    body: JSON.stringify({
+      data: {
+        id: safeOrgId,
+        type: resource.type,
+        attributes: { secrets_enabled: resource.attributes.secrets_enabled },
+      },
+    }),
   });
   if (!res.ok) throw new Error(`REST updateSecretsSettings failed: ${res.status} ${await res.text()}`);
   const body = (await res.json()) as { data: SecretsSettingsResource };

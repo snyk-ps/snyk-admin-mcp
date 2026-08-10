@@ -1,24 +1,32 @@
 {
   "name": "snyk-admin-mcp",
-  "version": "1.0.0",
-  "description": "MCP server for Snyk platform admin: copy org settings, clone integrations, bulk asset labels",
+  "version": "2.0.0",
+  "description": "MCP server for Snyk platform admin: copy org settings (V1/SAST/languages/secrets), clone integrations, move projects, manage project tags and asset labels, and search audit logs",
   "type": "module",
   "main": "dist/index.js",
+  "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/snyk-ps/snyk-admin-mcp.git"
+  },
   "scripts": {
     "build": "tsc",
     "start": "node dist/index.js",
-    "dev": "tsc && node dist/index.js"
+    "dev": "tsc && node dist/index.js",
+    "test": "npm run build && node --test"
   },
   "engines": {
     "node": ">=18"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.0.0",
-    "dotenv": "^16.3.1",
-    "zod": "^3.23.0"
+    "@modelcontextprotocol/sdk": "1.27.1",
+    "dotenv": "16.6.1",
+    "zod": "3.25.76",
+    "zod-to-json-schema": "3.25.2"
   },
   "devDependencies": {
-    "@types/node": "^20.10.0",
-    "typescript": "^5.3.0"
+    "@types/node": "20.19.37",
+    "typescript": "5.9.3"
   }
 }

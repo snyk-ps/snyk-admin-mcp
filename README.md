@@ -8,7 +8,9 @@ MCP server for managing the Snyk platform as a customer with group admin permiss
 - **Clone integration** – Clone an integration (with settings and credentials) from one org to another.
 - **Create organization** – Create a new org, optionally copying settings from a template org.
 - **Project tags** – Add or remove tags on many projects in one go.
+- **Move projects** – Move one or more projects from a source org to a target org.
 - **Asset labeling** – Search, look up, and label assets (class/labels/tags) — one at a time, or many at once. Covers repository, image, and package assets.
+- **Audit logs** – Search org or group audit logs by time range, user, project, or event type.
 - **Dry run + approval** – Every mutation supports `dry_run=true` (default) to preview a plan first. Apply with `dry_run=false` and the `approval_token` returned from the dry run. Tokens expire after 10 minutes.
 
 ## Setup
@@ -29,14 +31,14 @@ In the project root, create a `.env` file with your values:
 ```bash
 # Create .env in project root with:
 #   SNYK_API_TOKEN=your-snyk-api-token-here
-#   SNYK_API_REGION=global
+#   SNYK_API_REGION=us-01
 ```
 
 The server loads `.env` from the project root on startup. Do not commit `.env` (it is gitignored).
 
 **Option B: Environment variables**
 
-Set **SNYK_API_TOKEN** (or **SNYK_TOKEN**) and optionally **SNYK_API_REGION** (`global` | `eu` | `us` | `au`) in your shell or in your MCP client config.
+Set **SNYK_API_TOKEN** (or **SNYK_TOKEN**) and optionally **SNYK_API_REGION** in your shell or in your MCP client config. Values match Snyk's own [regional tenant names](https://docs.snyk.io/snyk-data-and-governance/regional-hosting-and-data-residency): `us-01` (default — SNYK-US-01, the original tenant; pre-September-2024 and Free-plan accounts), `us-02` (SNYK-US-02, new US Enterprise/Pilot accounts), `eu-01` (SNYK-EU-01, Frankfurt), `au-01` (SNYK-AU-01, Australia). Not sure which one you're on? Check the URL you use to log into the Snyk web app — `app.snyk.io` is `us-01`, `app.us.snyk.io` is `us-02`, and so on.
 
 ### 3. Add the MCP server to your MCP client
 
@@ -64,7 +66,7 @@ Replace `/ABSOLUTE/PATH/TO/snyk-admin-mcp` with the real path to this repo (e.g.
 ```json
 "env": {
   "SNYK_API_TOKEN": "your-token",
-  "SNYK_API_REGION": "global"
+  "SNYK_API_REGION": "us-01"
 }
 ```
 
@@ -82,11 +84,13 @@ Some clients differ in config file location or key name (for example, VS Code's 
 | `snyk_list_orgs` | List organizations. Read-only. Supports cursor pagination (`limit`, `starting_after`, `ending_before`) and filters (`group_id`, `is_personal`, `slug`, `name`). |
 | `snyk_list_integrations` | List integrations for an org. Read-only. |
 | `snyk_list_projects` | List projects for an org. Read-only. |
+| `snyk_search_audit_logs` | Search audit logs for an org or group, filterable by time range, user, project, or event type. Read-only. |
 | `snyk_create_organization` | Create a new Snyk organization. Optional: `group_id`, `source_org_id` (copy settings from a template org). Dry run / approval flow. |
 | `snyk_copy_org_settings` | Copy org settings (V1), SAST settings, Open Source language settings, and Secrets settings (all REST; Secrets is Early Access/beta) from a source org to a target org. Dry run → plan + `approval_token`; then call again with `dry_run=false` and that token to apply. |
 | `snyk_clone_integration` | Clone one integration from a source org to a target org (CLI integrations excluded). Same dry run / approval flow. |
 | `snyk_add_project_tags` | Add tags to multiple projects at once. Same dry run / approval flow. |
 | `snyk_remove_project_tags` | Remove tags (by key) from multiple projects at once. Same dry run / approval flow. |
+| `snyk_move_projects` | Move one or more projects from a source org to a target org. Same dry run / approval flow. |
 | `snyk_search_assets` | Search assets in a group with optional attribute filters. Read-only. |
 | `snyk_get_asset` | Get a single asset by ID within a group. Read-only. |
 | `snyk_list_asset_projects` | List projects related to an asset, with cursor pagination. Read-only. |
@@ -97,7 +101,9 @@ Some clients differ in config file location or key name (for example, VS Code's 
 
 - **Labels vs. tags** – `labels` are flat strings, `tags` are key/value pairs; `snyk_update_assets` takes `add`/`remove` for both, so existing values are preserved unless removed explicitly. The API gives no provenance for labels, but Snyk mirrors every detected language into `labels` — so a label matching a `languages` key is auto-generated (verified across a 29-repo group, no exceptions); the rest is yours, an asset policy's, or occasionally an internal label the UI never shows (e.g. `new repository`).
 - **Project tags ≠ asset labels** – `snyk_add_project_tags` / `snyk_remove_project_tags` tag *projects* via the V1 API. Use `snyk_update_assets` to label assets.
-- **No batch endpoint, not atomic** – `snyk_update_assets` and the project-tag tools each issue one API call per item (concurrently, rate-limited); a partial failure leaves earlier items updated.
+- **No batch endpoint, not atomic** – `snyk_update_assets`, the project-tag tools, and `snyk_move_projects` each issue one API call per item (concurrently, rate-limited); a partial failure leaves earlier items updated (for `snyk_move_projects`, that means some projects already moved and some still in the source org).
+- **`snyk_move_projects` needs group-admin permissions**, and if the move crosses group boundaries it needs a personal API key rather than a service account key — no REST equivalent exists for this, only the V1 API has it.
+- **`snyk_search_audit_logs` omits `api.access` events by default** — that's the API's own behavior, not a filter this server adds. Pass `events: ["api.access"]` explicitly if you need them. Provide exactly one of `org_id`/`group_id`, and `events`/`exclude_events` are mutually exclusive.
 - **`snyk_copy_org_settings` copies four separate resources** – V1 org settings (only fields editable via `PUT /v1/org/{orgId}/settings`, e.g. `requestAccess`), SAST settings (Snyk Code enablement/autofix), Open Source language settings (per-ecosystem, e.g. npm/maven/pip), and Secrets settings (`secrets_enabled` — Early Access/beta) — the latter three via the REST API. Each is applied independently and reported per-step, so a failure on one (e.g. the beta Secrets endpoint) doesn't block the others; check the returned step list if the target org ends up partially configured. 
 - **Asset tools are group-scoped** – pass `group_id`, not an org ID (`snyk_list_orgs` returns each org's `group_id`).
 - **Rate limits** – throttled to ~90% of Snyk's limits (REST 1620/min, V1 2000/min), with automatic retry on 429.

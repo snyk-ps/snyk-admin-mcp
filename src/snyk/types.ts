@@ -1,5 +1,21 @@
-export type SnykRegion = "global" | "eu" | "us" | "au";
+/**
+ * Shared config, URL-building, and security guards for both Snyk API clients
+ * (REST in rest.ts, V1 in v1.ts). Nothing here talks to the network directly —
+ * it's the plumbing every request goes through before `fetch()` is called.
+ */
 
+/**
+ * Snyk's regional tenants, named to match Snyk's own docs
+ * (https://docs.snyk.io/snyk-data-and-governance/regional-hosting-and-data-residency):
+ * SNYK-US-01 (the original/default tenant — pre-September-2024 and Free-plan accounts),
+ * SNYK-US-02 (new US Enterprise/Pilot accounts via automated provisioning), SNYK-EU-01
+ * (Frankfurt), SNYK-AU-01 (Australia). SNYK-GOV-01 (Snyk for Government) exists but isn't
+ * included here — Snyk's docs don't publish an API base URL for it, only a web app URL, so
+ * there's nothing confirmed to point this client at.
+ */
+export type SnykRegion = "us-01" | "us-02" | "eu-01" | "au-01";
+
+/** Default REST API version. Individual endpoints override this via `restFetch`'s `version` option when they need a newer or beta-only version. */
 export const REST_API_VERSION = "2024-10-15";
 
 /** Version for the Asset API endpoints (Early Access). Newer than the default REST version. */
@@ -22,7 +38,9 @@ export function sanitizePathSegment(value: string, label: string): string {
   return value;
 }
 
+/** Credentials and host selection passed to every REST/V1 client call in this server. */
 export interface SnykApiConfig {
+  /** Snyk API token, sent as `Authorization: token <token>` on every request. */
   token: string;
   /** Base URL without path, e.g. https://api.snyk.io or https://api.us.snyk.io */
   baseUrl?: string;
@@ -31,18 +49,19 @@ export interface SnykApiConfig {
 }
 
 const REGION_HOSTS: Record<SnykRegion, string> = {
-  global: "https://api.snyk.io",
-  eu: "https://api.eu.snyk.io",
-  us: "https://api.us.snyk.io",
-  au: "https://api.au.snyk.io",
+  "us-01": "https://api.snyk.io",
+  "us-02": "https://api.us.snyk.io",
+  "eu-01": "https://api.eu.snyk.io",
+  "au-01": "https://api.au.snyk.io",
 };
 
+/** Resolve the REST and V1 base URLs (no trailing path) for a config's region or explicit `baseUrl` override. */
 export function getBaseUrl(config: SnykApiConfig): { rest: string; v1: string } {
   if (config.baseUrl) {
     const base = config.baseUrl.replace(/\/$/, "");
     return { rest: `${base}/rest`, v1: `${base}/v1` };
   }
-  const host = REGION_HOSTS[config.region ?? "global"];
+  const host = REGION_HOSTS[config.region ?? "us-01"];
   return { rest: `${host}/rest`, v1: `${host}/v1` };
 }
 

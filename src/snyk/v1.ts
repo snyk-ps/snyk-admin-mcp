@@ -2,6 +2,13 @@ import { assertAllowedUrl, getBaseUrl, sanitizePathSegment, type SnykApiConfig }
 import { fetchWithRetry, v1RateLimiter } from "./rateLimit.js";
 
 /**
+ * Client for Snyk's V1 API — org settings, integration listing/cloning, and project tags.
+ * Everything here predates the REST/JSON:API surface in rest.ts; use this module only for
+ * the specific things V1 still does that REST doesn't (see README.md's Notes and NOTES.md's
+ * "V1 org API notes" for which tools rely on which).
+ */
+
+/**
  * Snyk V1 API. Use for: org settings, integrations (clone), project tags/labels.
  * Rate-limited to stay under 2000/min; retries on 429.
  * Docs: https://docs.snyk.io/snyk-api/v1-api
@@ -49,25 +56,48 @@ export async function updateOrgSettings(
   return res.json() as Promise<Record<string, unknown>>;
 }
 
-/** GET integrations for org (V1). Returns object: integration type name -> integration id. */
+/**
+ * `listIntegrations` gets looked up 2-3 times in a single `snyk_clone_integration` call (the
+ * CLI-integration check, then `formatIntegrationId` in the dry-run text, then again in the
+ * apply confirmation) — memoize briefly so those collapse into one request, the same fix
+ * `getOrgName` already got in rest.ts. Unlike that cache, this one can mask an integration
+ * added to the org within the last minute; accepted here since nothing in this server reads
+ * this map for correctness-critical decisions (only for display and the CLI-type check, which
+ * fails safe either way — the clone call itself will still reject a CLI integration server-side).
+ */
+const INTEGRATIONS_TTL_MS = 60_000;
+const integrationsCache = new Map<string, { map: Record<string, string>; at: number }>();
+
+/**
+ * GET integrations for org (V1). Returns `{ integrationType: integrationId }`.
+ * Normalizes two response shapes seen from this endpoint: a flat `{ type: id }` map
+ * (the common case, detected by every value being a string), and an `{ integrations: [...] }`
+ * array form — both are converted to the same flat map so every caller only deals with one shape.
+ */
 export async function listIntegrations(config: SnykApiConfig, orgId: string): Promise<Record<string, string>> {
   const safe = sanitizePathSegment(orgId, "org_id");
+  const cached = integrationsCache.get(safe);
+  if (cached && Date.now() - cached.at < INTEGRATIONS_TTL_MS) return cached.map;
+
   const res = await v1Fetch(config, `org/${safe}/integrations`);
   if (!res.ok) throw new Error(`V1 listIntegrations failed: ${res.status} ${await res.text()}`);
   const raw = (await res.json()) as Record<string, string> | { integrations?: { id: string; type?: string }[] };
+  let result: Record<string, string>;
   if (raw && typeof raw === "object" && !Array.isArray(raw) && raw.integrations == null && Object.keys(raw).some((k) => typeof (raw as Record<string, string>)[k] === "string")) {
-    return raw as Record<string, string>;
-  }
-  if (Array.isArray((raw as { integrations?: unknown }).integrations)) {
+    result = raw as Record<string, string>;
+  } else if (Array.isArray((raw as { integrations?: unknown }).integrations)) {
     const arr = (raw as { integrations: { id: string; type?: string }[] }).integrations;
     const out: Record<string, string> = {};
     for (const i of arr) {
       const type = i.type ?? i.id;
       out[type] = i.id;
     }
-    return out;
+    result = out;
+  } else {
+    result = raw as Record<string, string>;
   }
-  return raw as Record<string, string>;
+  integrationsCache.set(safe, { map: result, at: Date.now() });
+  return result;
 }
 
 /** Get integration type name for an integration id in an org. Returns null if not found. */
@@ -144,6 +174,34 @@ export async function removeProjectTag(
   });
   if (!res.ok) throw new Error(`V1 removeProjectTag failed: ${res.status} ${await res.text()}`);
   return res.json();
+}
+
+/** Response shape for a successful project move. */
+export type MoveProjectResult = { originOrg: string; destinationOrg: string; movedProject: string };
+
+/**
+ * Move a project from one org to another (V1). PUT org/{orgId}/project/{projectId}/move,
+ * body `{ targetOrgId }`. No REST equivalent exists — checked the REST API's
+ * `PatchProjectRequest` schema directly; it only covers project metadata (business
+ * criticality, environment, lifecycle, tags), nothing for reassigning a project's org.
+ * Per Snyk's docs, moving across group boundaries needs a personal API key, not a service
+ * account key, in addition to the usual group-admin permission this whole server assumes.
+ */
+export async function moveProject(
+  config: SnykApiConfig,
+  orgId: string,
+  projectId: string,
+  targetOrgId: string
+): Promise<MoveProjectResult> {
+  const safeOrg = sanitizePathSegment(orgId, "org_id");
+  const safeProject = sanitizePathSegment(projectId, "project_id");
+  const safeTarget = sanitizePathSegment(targetOrgId, "target_org_id");
+  const res = await v1Fetch(config, `org/${safeOrg}/project/${safeProject}/move`, {
+    method: "PUT",
+    body: JSON.stringify({ targetOrgId: safeTarget }),
+  });
+  if (!res.ok) throw new Error(`V1 moveProject failed: ${res.status} ${await res.text()}`);
+  return res.json() as Promise<MoveProjectResult>;
 }
 
 /**

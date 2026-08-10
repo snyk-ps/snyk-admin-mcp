@@ -11,6 +11,7 @@ export interface RateLimiter {
   schedule<T>(fn: () => Promise<T>): Promise<T>;
 }
 
+/** Build a limiter that allows at most `requestsPerMinute` request starts in any trailing 60s window. */
 function createSlidingWindowLimiter(requestsPerMinute: number): RateLimiter {
   const timestamps: number[] = [];
   const queue: Array<() => void> = [];
@@ -37,6 +38,12 @@ function createSlidingWindowLimiter(requestsPerMinute: number): RateLimiter {
     });
   }
 
+  /**
+   * Drain the queue one slot-wait at a time. `fn()` is deliberately not awaited before
+   * recursing into `pump()` again — only *acquiring a slot* is serialized here, not the
+   * request itself. That's what lets many requests be in flight concurrently while still
+   * capping how many can *start* per minute (matches the module-level doc comment).
+   */
   function pump(): void {
     if (pumping || queue.length === 0) return;
     pumping = true;
