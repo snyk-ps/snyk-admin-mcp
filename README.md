@@ -143,4 +143,4 @@ Clients that support annotations can run read-only tools freely and always confi
 
 ## License
 
-Copyright 2026 Snyk Ltd. Licensed under the [Apache License, Version 2.0](LICENSE). See [NOTICE](NOTICE).
+Copyright 2026 Snyk Ltd. Licensed under the [Apache License, Version 2.0](LICENSE).
