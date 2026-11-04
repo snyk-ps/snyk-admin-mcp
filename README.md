@@ -11,6 +11,7 @@ MCP server for managing the Snyk platform as a customer with group admin permiss
 - **Move projects** – Move one or more projects from a source org to a target org.
 - **Asset labeling** – Search, look up, and label assets (class/labels/tags) — one at a time, or many at once. Covers repository, image, and package assets.
 - **Audit logs** – Search org or group audit logs by time range, user, project, or event type.
+- **Collections** – List collections and their projects, create collections, rename them, and add or remove projects in batches of 100.
 - **Dry run + approval** – Every mutation supports `dry_run=true` (default) to preview a plan first. Apply with `dry_run=false` and the `approval_token` returned from the dry run. Tokens expire after 10 minutes.
 
 ## Setup
@@ -96,6 +97,10 @@ Some clients differ in config file location or key name (for example, VS Code's 
 | `snyk_list_asset_projects` | List projects related to an asset, with cursor pagination. Read-only. |
 | `snyk_list_related_assets` | List assets related to an asset, with optional type filter and pagination. Read-only. |
 | `snyk_update_assets` | Update class, labels, and/or tags on one or more assets (repos included). One request per asset. Dry run / approval flow. |
+| `snyk_list_collections` | List collections in an org, with project and issue counts. Filter by name or `is_generated`; sort and paginate. Read-only. |
+| `snyk_list_collection_projects` | List the projects in a collection (IDs, targets, issue counts). Filter by target, integration, or with/without issues. Read-only. |
+| `snyk_create_collection` | Create a collection, optionally adding projects to it. Dry run / approval flow. |
+| `snyk_update_collection` | Rename a collection and/or add or remove projects. Dry run / approval flow. |
 
 ## Notes
 
@@ -106,6 +111,11 @@ Some clients differ in config file location or key name (for example, VS Code's 
 - **`snyk_search_audit_logs` omits `api.access` events by default** — that's the API's own behavior, not a filter this server adds. Pass `events: ["api.access"]` explicitly if you need them. Provide exactly one of `org_id`/`group_id`, and `events`/`exclude_events` are mutually exclusive.
 - **`snyk_copy_org_settings` copies four separate resources** – V1 org settings (only fields editable via `PUT /v1/org/{orgId}/settings`, e.g. `requestAccess`), SAST settings (Snyk Code enablement/autofix), Open Source language settings (per-ecosystem, e.g. npm/maven/pip), and Secrets settings (`secrets_enabled` — Early Access/beta) — the latter three via the REST API. Each is applied independently and reported per-step, so a failure on one (e.g. the beta Secrets endpoint) doesn't block the others; check the returned step list if the target org ends up partially configured. 
 - **Asset tools are group-scoped** – pass `group_id`, not an org ID (`snyk_list_orgs` returns each org's `group_id`).
+- **Collections are org-scoped** – there is no group-level collection endpoint, so covering a whole group means one call per org. Projects must be in the collection's org.
+- **Generated collections** – Snyk creates one collection per imported repository, named after it (e.g. `github.com/org/repo`) and flagged `is_generated`. Pass `is_generated: false` to `snyk_list_collections` to see only the ones people made. `snyk_update_collection` warns in its dry run before changing a generated one.
+- **Collection changes are batched, not atomic** – the API takes up to 100 project IDs per add/remove request, so larger lists are split into batches and sent in order. If a batch fails, earlier batches stay applied; the result lists each step. For `snyk_create_collection`, the collection itself is kept even if adding projects fails.
+- **The API ignores bad project IDs without an error** – adding an unknown project ID, or a project from a different org, still returns success but changes nothing. So after any add or remove, the collection tools re-read the collection (one request per 100 members) and list each project that didn't take effect under `not_added` / `not_removed`.
+- **Collection projects come back without names** – the API returns project IDs, target IDs, and issue counts only; use `snyk_list_projects` to map IDs to names.
 - **Rate limits** – throttled to ~90% of Snyk's limits (REST 1620/min, V1 2000/min), with automatic retry on 429.
 
 ## Workflow (mutations)

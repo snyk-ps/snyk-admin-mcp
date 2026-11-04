@@ -4,7 +4,8 @@ import { fetchWithRetry, restRateLimiter } from "./rateLimit.js";
 /**
  * Client for Snyk's REST API (JSON:API). Grouped by area in source order: orgs/projects,
  * per-org settings resources used by snyk_copy_org_settings (SAST, Open Source languages,
- * Secrets), then the Asset API used by snyk_search_assets/snyk_update_assets. Each settings
+ * Secrets), the Asset API used by snyk_search_assets/snyk_update_assets, then Collections
+ * (org-scoped project groupings) used by the snyk_*_collection* tools. Each settings
  * function pair follows the same shape: GET returns a resource, and the corresponding update
  * function takes that resource straight back — never hardcode a resource's `type` or `id`
  * when a caller could instead pass through what a prior GET returned (see the SAST/Secrets
@@ -494,4 +495,256 @@ export async function updateAsset(
   });
   if (!res.ok) throw new Error(`REST updateAsset failed: ${res.status} ${await res.text()}`);
   return res.json() as Promise<Record<string, unknown>>;
+}
+
+// ---------------------------------------------------------------------------
+// Collections (GA since 2023-09-12, served under the default REST_API_VERSION).
+// Org-scoped named groupings of projects — there is no group-level endpoint.
+// Docs: https://docs.snyk.io/developer-tools/snyk-api/reference/collection
+// ---------------------------------------------------------------------------
+
+/** The add/remove-projects endpoints reject bodies with more than this many project IDs (`maxItems: 100` in the spec). */
+export const COLLECTION_PROJECTS_MAX_PER_REQUEST = 100;
+
+/** Allowed collection name characters, copied from the spec's create/edit `name` pattern (1-255 chars). */
+export const COLLECTION_NAME_PATTERN = /^[a-zA-Z0-9 _\-/:.]+$/;
+
+/**
+ * One collection. `is_generated` collections are created and maintained by Snyk itself —
+ * live data shows one per imported repository, named after it (e.g. `github.com/org/repo`),
+ * with a null `created_by_user`. `meta` is only present on list responses.
+ */
+export type CollectionResource = {
+  id: string;
+  type: string;
+  attributes: { name: string; is_generated?: boolean };
+  meta?: {
+    projects_count: number;
+    issues_critical_count: number;
+    issues_high_count: number;
+    issues_medium_count: number;
+    issues_low_count: number;
+  };
+  relationships?: {
+    created_by_user?: { data: { type: string; id: string | null } };
+    org?: { data: { type: string; id: string } };
+  };
+};
+
+/** JSON:API cursor links. `next`/`prev` are relative paths (e.g. `/rest/orgs/...?starting_after=...`), not bare cursors. */
+export type PageLinks = { self?: string; next?: string; prev?: string; first?: string; last?: string };
+
+export type ListCollectionsResponse = { data: CollectionResource[]; links?: PageLinks };
+
+/** One project in a collection. The API returns IDs and issue counts only — no project names. */
+export type CollectionProject = {
+  id: string;
+  type: string;
+  meta: {
+    imported: string;
+    last_tested_at: string;
+    issues_critical_count: number;
+    issues_high_count: number;
+    issues_medium_count: number;
+    issues_low_count: number;
+  };
+  relationships: { target: { data: { type: string; id: string } } };
+};
+
+export type ListCollectionProjectsResponse = { data: CollectionProject[]; links?: PageLinks };
+
+/**
+ * Pull a cursor query param out of a JSON:API link: `starting_after` / `ending_before` for
+ * most list endpoints, `cursor` for audit-log search. Snyk's `links.next` is a full relative
+ * URL, so handing it back verbatim as the cursor sends the whole path as its value — the
+ * audit-log API answers that with 400 "invalid cursor" (verified live).
+ */
+export function cursorFromLink(
+  link: string | undefined,
+  param: "starting_after" | "ending_before" | "cursor"
+): string | null {
+  if (!link) return null;
+  try {
+    return new URL(link, "https://placeholder.invalid").searchParams.get(param);
+  } catch {
+    return null;
+  }
+}
+
+/** List collections in an org. GET /orgs/{org_id}/collections, with filters, sort, and cursor pagination. */
+export async function listCollections(
+  config: SnykApiConfig,
+  orgId: string,
+  opts: {
+    limit?: number;
+    starting_after?: string;
+    ending_before?: string;
+    sort?: "name" | "projectsCount" | "issues";
+    direction?: "ASC" | "DESC";
+    name?: string;
+    is_generated?: boolean;
+  } = {}
+): Promise<ListCollectionsResponse> {
+  const safeOrgId = sanitizePathSegment(orgId, "org_id");
+  const qs = buildQuery({
+    limit: opts.limit,
+    starting_after: opts.starting_after,
+    ending_before: opts.ending_before,
+    sort: opts.sort,
+    direction: opts.direction,
+    name: opts.name,
+    is_generated: opts.is_generated === undefined ? undefined : String(opts.is_generated),
+  });
+  const res = await restFetch(config, `/orgs/${safeOrgId}/collections${qs}`);
+  if (!res.ok) throw new Error(`REST listCollections failed: ${res.status} ${await res.text()}`);
+  return res.json() as Promise<ListCollectionsResponse>;
+}
+
+/** Get one collection. GET /orgs/{org_id}/collections/{collection_id}. */
+export async function getCollection(config: SnykApiConfig, orgId: string, collectionId: string): Promise<CollectionResource> {
+  const safeOrgId = sanitizePathSegment(orgId, "org_id");
+  const safeCollectionId = sanitizePathSegment(collectionId, "collection_id");
+  const res = await restFetch(config, `/orgs/${safeOrgId}/collections/${safeCollectionId}`);
+  if (!res.ok) throw new Error(`REST getCollection failed: ${res.status} ${await res.text()}`);
+  const body = (await res.json()) as { data: CollectionResource };
+  return body.data;
+}
+
+/** Throws client-side, before any request, if a name would fail the API's own length/pattern check. */
+function assertValidCollectionName(name: string): void {
+  if (name.length < 1 || name.length > 255 || !COLLECTION_NAME_PATTERN.test(name)) {
+    throw new Error(
+      `Invalid collection name "${name}": must be 1-255 characters of letters, digits, spaces, or _ - / : .`
+    );
+  }
+}
+
+/** Create an empty collection. POST /orgs/{org_id}/collections. Requires org.collection.create. */
+export async function createCollection(config: SnykApiConfig, orgId: string, name: string): Promise<CollectionResource> {
+  const safeOrgId = sanitizePathSegment(orgId, "org_id");
+  assertValidCollectionName(name);
+  const res = await restFetch(config, `/orgs/${safeOrgId}/collections`, {
+    method: "POST",
+    body: JSON.stringify({ data: { type: "collection", attributes: { name } } }),
+  });
+  if (!res.ok) throw new Error(`REST createCollection failed: ${res.status} ${await res.text()}`);
+  const body = (await res.json()) as { data: CollectionResource };
+  return body.data;
+}
+
+/** Rename a collection — `name` is the only editable attribute. PATCH /orgs/{org_id}/collections/{collection_id}. Requires org.collection.edit. */
+export async function renameCollection(
+  config: SnykApiConfig,
+  orgId: string,
+  collectionId: string,
+  name: string
+): Promise<CollectionResource> {
+  const safeOrgId = sanitizePathSegment(orgId, "org_id");
+  const safeCollectionId = sanitizePathSegment(collectionId, "collection_id");
+  assertValidCollectionName(name);
+  const res = await restFetch(config, `/orgs/${safeOrgId}/collections/${safeCollectionId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ data: { type: "collection", id: safeCollectionId, attributes: { name } } }),
+  });
+  if (!res.ok) throw new Error(`REST renameCollection failed: ${res.status} ${await res.text()}`);
+  const body = (await res.json()) as { data: CollectionResource };
+  return body.data;
+}
+
+/**
+ * List the projects in a collection. GET /orgs/{org_id}/collections/{collection_id}/relationships/projects.
+ * Array filters are sent as repeated keys (OpenAPI's default form/explode encoding).
+ */
+export async function listCollectionProjects(
+  config: SnykApiConfig,
+  orgId: string,
+  collectionId: string,
+  opts: {
+    limit?: number;
+    starting_after?: string;
+    ending_before?: string;
+    sort?: "imported" | "last_tested_at" | "issues";
+    direction?: "ASC" | "DESC";
+    target_id?: string[];
+    show?: ("vuln-groups" | "clean-groups")[];
+    integration?: string[];
+  } = {}
+): Promise<ListCollectionProjectsResponse> {
+  const safeOrgId = sanitizePathSegment(orgId, "org_id");
+  const safeCollectionId = sanitizePathSegment(collectionId, "collection_id");
+  const search = new URLSearchParams();
+  if (opts.limit !== undefined) search.append("limit", String(opts.limit));
+  if (opts.starting_after) search.append("starting_after", opts.starting_after);
+  if (opts.ending_before) search.append("ending_before", opts.ending_before);
+  if (opts.sort) search.append("sort", opts.sort);
+  if (opts.direction) search.append("direction", opts.direction);
+  for (const t of opts.target_id ?? []) search.append("target_id", t);
+  for (const s of opts.show ?? []) search.append("show", s);
+  for (const i of opts.integration ?? []) search.append("integration", i);
+  const qs = search.toString();
+  const res = await restFetch(
+    config,
+    `/orgs/${safeOrgId}/collections/${safeCollectionId}/relationships/projects${qs ? `?${qs}` : ""}`
+  );
+  if (!res.ok) throw new Error(`REST listCollectionProjects failed: ${res.status} ${await res.text()}`);
+  return res.json() as Promise<ListCollectionProjectsResponse>;
+}
+
+/**
+ * Add (POST) or remove (DELETE) up to 100 projects in one request.
+ * /orgs/{org_id}/collections/{collection_id}/relationships/projects. Returns 204 on success.
+ * Callers with more than 100 IDs must chunk — this throws rather than silently truncating.
+ */
+async function changeCollectionProjects(
+  config: SnykApiConfig,
+  method: "POST" | "DELETE",
+  orgId: string,
+  collectionId: string,
+  projectIds: string[]
+): Promise<void> {
+  const safeOrgId = sanitizePathSegment(orgId, "org_id");
+  const safeCollectionId = sanitizePathSegment(collectionId, "collection_id");
+  if (projectIds.length === 0) return;
+  if (projectIds.length > COLLECTION_PROJECTS_MAX_PER_REQUEST) {
+    throw new Error(`At most ${COLLECTION_PROJECTS_MAX_PER_REQUEST} project IDs per request (got ${projectIds.length}); chunk the list.`);
+  }
+  const data = projectIds.map((id) => ({ type: "project", id: sanitizePathSegment(id, "project_id") }));
+  const res = await restFetch(config, `/orgs/${safeOrgId}/collections/${safeCollectionId}/relationships/projects`, {
+    method,
+    body: JSON.stringify({ data }),
+  });
+  if (!res.ok) {
+    const verb = method === "POST" ? "addProjectsToCollection" : "removeProjectsFromCollection";
+    throw new Error(`REST ${verb} failed: ${res.status} ${await res.text()}`);
+  }
+}
+
+/** Add up to 100 projects to a collection. Requires org.collection.edit. */
+export function addProjectsToCollection(config: SnykApiConfig, orgId: string, collectionId: string, projectIds: string[]): Promise<void> {
+  return changeCollectionProjects(config, "POST", orgId, collectionId, projectIds);
+}
+
+/** Remove up to 100 projects from a collection. Requires org.collection.edit. */
+export function removeProjectsFromCollection(config: SnykApiConfig, orgId: string, collectionId: string, projectIds: string[]): Promise<void> {
+  return changeCollectionProjects(config, "DELETE", orgId, collectionId, projectIds);
+}
+
+/** Safety cap when paging through a collection's members (100 per page → 10,000 projects). */
+const MAX_COLLECTION_MEMBER_PAGES = 100;
+
+/**
+ * Every project ID in a collection, following cursor pagination at 100 per page.
+ * Used to verify add/remove results: those endpoints return 204 even for IDs they ignore.
+ */
+export async function listAllCollectionProjectIds(config: SnykApiConfig, orgId: string, collectionId: string): Promise<string[]> {
+  const ids: string[] = [];
+  let cursor: string | undefined;
+  for (let page = 0; page < MAX_COLLECTION_MEMBER_PAGES; page++) {
+    const res = await listCollectionProjects(config, orgId, collectionId, { limit: 100, starting_after: cursor });
+    for (const p of res.data ?? []) ids.push(p.id);
+    const next = cursorFromLink(res.links?.next, "starting_after");
+    if (!next) return ids;
+    cursor = next;
+  }
+  throw new Error(`Collection has more than ${MAX_COLLECTION_MEMBER_PAGES * 100} projects; stopped paging.`);
 }
