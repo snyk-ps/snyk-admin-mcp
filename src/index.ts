@@ -189,8 +189,8 @@ const SearchAssetsArgsSchema = z.object({
   group_id: z.string().describe("Group ID to search assets in"),
   query: z.object({ attributes: AssetSearchAttributesSchema }).optional().describe("Optional filter. Omit to list all assets."),
   limit: z.number().int().min(10).max(100).optional().describe("Records to return (10-100)"),
-  starting_after: z.string().optional().describe("Cursor: return records after this cursor"),
-  ending_before: z.string().optional().describe("Cursor: return records before this cursor"),
+  starting_after: z.string().optional().describe("Cursor: next_starting_after from a previous response"),
+  ending_before: z.string().optional().describe("Cursor: prev_ending_before from a previous response"),
 });
 
 const GetAssetArgsSchema = z.object({
@@ -202,8 +202,8 @@ const ListAssetProjectsArgsSchema = z.object({
   group_id: z.string(),
   asset_id: z.string(),
   limit: z.number().int().min(10).max(100).optional(),
-  starting_after: z.string().optional(),
-  ending_before: z.string().optional(),
+  starting_after: z.string().optional().describe("Cursor: next_starting_after from a previous response"),
+  ending_before: z.string().optional().describe("Cursor: prev_ending_before from a previous response"),
 });
 
 const ListRelatedAssetsArgsSchema = z.object({
@@ -211,8 +211,8 @@ const ListRelatedAssetsArgsSchema = z.object({
   asset_id: z.string(),
   type: z.enum(["repository", "package", "image"]).optional(),
   limit: z.number().int().min(10).max(100).optional(),
-  starting_after: z.string().optional(),
-  ending_before: z.string().optional(),
+  starting_after: z.string().optional().describe("Cursor: next_starting_after from a previous response"),
+  ending_before: z.string().optional().describe("Cursor: prev_ending_before from a previous response"),
 });
 
 // --- Update assets (Asset API). The API has no batch endpoint: one PATCH per asset. ---
@@ -380,11 +380,25 @@ function membershipClean(check: MembershipCheck | null): boolean {
 }
 
 /** Format a list response's cursor links as bare cursors the caller can pass straight back. */
-function collectionPagination(links: rest.PageLinks | undefined) {
+function pageCursors(links: rest.PageLinks | undefined) {
   return {
     next_starting_after: rest.cursorFromLink(links?.next, "starting_after"),
     prev_ending_before: rest.cursorFromLink(links?.prev, "ending_before"),
   };
+}
+
+/**
+ * Render a raw Asset API page with its `links` swapped for bare cursors. Left raw, the only
+ * cursor a caller sees is the `links.next` path, and passing that back as `starting_after`
+ * makes asset search answer 500 "pagination error" (verified live).
+ */
+function assetPageText(data: Record<string, unknown>): string {
+  const { links, ...withoutLinks } = data as { links?: rest.PageLinks } & Record<string, unknown>;
+  const pagination = pageCursors(links);
+  const hint = pagination.next_starting_after
+    ? `\n\nMore results: pass starting_after="${pagination.next_starting_after}" (with the same filters) to get the next page.`
+    : "";
+  return `${JSON.stringify({ ...withoutLinks, pagination }, null, 2)}${hint}`;
 }
 
 /**
@@ -610,7 +624,7 @@ async function handleToolCall(request: CallToolRequest): Promise<ToolResult> {
         ending_before: parsed.ending_before,
       });
       return {
-        content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
+        content: [{ type: "text", text: assetPageText(data) }],
         isError: false,
       };
     }
@@ -632,7 +646,7 @@ async function handleToolCall(request: CallToolRequest): Promise<ToolResult> {
         ending_before: parsed.ending_before,
       });
       return {
-        content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
+        content: [{ type: "text", text: assetPageText(data) }],
         isError: false,
       };
     }
@@ -646,7 +660,7 @@ async function handleToolCall(request: CallToolRequest): Promise<ToolResult> {
         ending_before: parsed.ending_before,
       });
       return {
-        content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
+        content: [{ type: "text", text: assetPageText(data) }],
         isError: false,
       };
     }
@@ -1017,7 +1031,7 @@ async function handleToolCall(request: CallToolRequest): Promise<ToolResult> {
           : "";
         return `${c.attributes.name} (${c.id})${c.attributes.is_generated ? " [generated]" : ""}${counts}`;
       });
-      const pagination = collectionPagination(data.links);
+      const pagination = pageCursors(data.links);
       const full = {
         data: collections.map((c) => ({
           id: c.id,
@@ -1054,7 +1068,7 @@ async function handleToolCall(request: CallToolRequest): Promise<ToolResult> {
         const m = p.meta;
         return `${p.id} — target ${p.relationships.target.data.id}; issues C${m.issues_critical_count} H${m.issues_high_count} M${m.issues_medium_count} L${m.issues_low_count}; last tested ${m.last_tested_at}`;
       });
-      const pagination = collectionPagination(data.links);
+      const pagination = pageCursors(data.links);
       const full = {
         data: projects.map((p) => ({ id: p.id, target_id: p.relationships.target.data.id, ...p.meta })),
         pagination,
