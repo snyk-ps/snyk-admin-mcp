@@ -12,11 +12,13 @@ MCP server for managing the Snyk platform as a customer with group admin permiss
 - **Asset labeling** – Search, look up, and label assets (class/labels/tags) — one at a time, or many at once. Covers repository, image, and package assets.
 - **Audit logs** – Search org or group audit logs by time range, user, project, or event type.
 - **Collections** – List collections and their projects, create collections, rename them, and add or remove projects in batches of 100.
-- **Dry run + approval** – Every mutation supports `dry_run=true` (default) to preview a plan first. Apply with `dry_run=false` and the `approval_token` returned from the dry run. Tokens expire after 10 minutes.
+- **Dry run + approval** – Every mutation supports `dry_run=true` (default) to preview a plan first. Apply with `dry_run=false` and the `approval_token` returned from the dry run. Tokens expire after 10 minutes. The token guarantees that what's applied is exactly what was previewed; it is not a human sign-off — see [Workflow](#workflow-mutations).
 
 ## Setup
 
 ### 1. Build the MCP server
+
+Requires Node.js 22 or later.
 
 ```bash
 npm install
@@ -109,7 +111,8 @@ Some clients differ in config file location or key name (for example, VS Code's 
 - **No batch endpoint, not atomic** – `snyk_update_assets`, the project-tag tools, and `snyk_move_projects` each issue one API call per item (concurrently, rate-limited); a partial failure leaves earlier items updated (for `snyk_move_projects`, that means some projects already moved and some still in the source org).
 - **`snyk_move_projects` needs group-admin permissions**, and if the move crosses group boundaries it needs a personal API key rather than a service account key — no REST equivalent exists for this, only the V1 API has it.
 - **`snyk_search_audit_logs` omits `api.access` events by default** — that's the API's own behavior, not a filter this server adds. Pass `events: ["api.access"]` explicitly if you need them. Provide exactly one of `org_id`/`group_id`, and `events`/`exclude_events` are mutually exclusive.
-- **`snyk_copy_org_settings` copies four separate resources** – V1 org settings (only fields editable via `PUT /v1/org/{orgId}/settings`, e.g. `requestAccess`), SAST settings (Snyk Code enablement/autofix), Open Source language settings (per-ecosystem, e.g. npm/maven/pip), and Secrets settings (`secrets_enabled` — Early Access/beta) — the latter three via the REST API. Each is applied independently and reported per-step, so a failure on one (e.g. the beta Secrets endpoint) doesn't block the others; check the returned step list if the target org ends up partially configured. 
+- **`snyk_copy_org_settings` copies four separate resources** – V1 org settings (only fields editable via `PUT /v1/org/{orgId}/settings`, e.g. `requestAccess`), SAST settings (Snyk Code enablement/autofix), Open Source language settings (per-ecosystem, e.g. npm/maven/pip), and Secrets settings (`secrets_enabled` — Early Access/beta) — the latter three via the REST API. Each is applied independently and reported per-step, so a failure on one (e.g. the beta Secrets endpoint) doesn't block the others; check the returned step list if the target org ends up partially configured. If the source org's Secrets settings can't be read at all (usually because the org doesn't have Snyk Secrets), the dry run says so and the Secrets step is skipped; the other three are still copied.
+- **Source and target must be different orgs** – `snyk_copy_org_settings`, `snyk_move_projects`, and `snyk_clone_integration` reject the same org ID as both source and target before making any API call; it almost always means the IDs were mixed up.
 - **Asset tools are group-scoped** – pass `group_id`, not an org ID (`snyk_list_orgs` returns each org's `group_id`).
 - **Collections are org-scoped** – there is no group-level collection endpoint, so covering a whole group means one call per org. Projects must be in the collection's org.
 - **Generated collections** – Snyk creates one collection per imported repository, named after it (e.g. `github.com/org/repo`) and flagged `is_generated`. Pass `is_generated: false` to `snyk_list_collections` to see only the ones people made. `snyk_update_collection` warns in its dry run before changing a generated one.
@@ -125,3 +128,19 @@ Some clients differ in config file location or key name (for example, VS Code's 
 3. To apply, call the same tool with **`dry_run: false`** and **`approval_token`** set to that value.
 
 Without a valid `approval_token`, the server will not perform the mutation.
+
+**What the token does and doesn't guarantee.** The token ties the apply to the exact plan from the dry run: same tool, same arguments, within 10 minutes, usable once. It does **not** prove a person reviewed the plan — the AI receives the token in the dry-run output and can make the apply call itself. The human check is your MCP client asking before it runs a tool, so **keep confirmation on for the tools that change Snyk** (don't choose "always allow" for them).
+
+To help clients do that, every tool is labelled in `tools/list` with MCP tool annotations:
+
+| Label | Tools |
+|-------|-------|
+| Read-only (`readOnlyHint: true`) | all `list`, `get`, and `search` tools |
+| Additive (`destructiveHint: false`) | `snyk_add_project_tags`, `snyk_create_organization`, `snyk_create_collection` |
+| Destructive (`destructiveHint: true`) | `snyk_copy_org_settings`, `snyk_clone_integration`, `snyk_remove_project_tags`, `snyk_move_projects`, `snyk_update_assets`, `snyk_update_collection` |
+
+Clients that support annotations can run read-only tools freely and always confirm the rest. Annotations are hints; whether and how a client uses them depends on the client.
+
+## License
+
+Copyright 2026 Snyk Ltd. Licensed under the [Apache License, Version 2.0](LICENSE). See [NOTICE](NOTICE).

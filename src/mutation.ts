@@ -1,14 +1,13 @@
 import { createApproval, peekApproval, discardApproval } from "./approval.js";
 
 /**
- * Shared dry-run/approve/apply engine for every mutating MCP tool. index.ts's
- * handleToolCall calls runMutationTool() once per mutating tool call instead of each
- * tool hand-rolling its own "build plan -> stash token -> return text" / "redeem
- * token -> apply" boilerplate. See the runMutationTool doc comment below for the
- * approval-binding guarantee this centralizes.
+ * Shared dry-run/approve/apply engine for every mutating MCP tool. Each mutating tool's
+ * handler in src/tools/ calls runMutationTool() instead of hand-rolling its own
+ * "build plan -> stash token -> return text" / "redeem token -> apply" boilerplate. See
+ * the runMutationTool doc comment below for the approval-binding guarantee this centralizes.
  */
 
-/** The shape every tool handler in index.ts returns — plain text content plus an error flag. */
+/** The shape every tool handler in src/tools/ returns — plain text content plus an error flag. */
 export interface ToolResult {
   content: { type: "text"; text: string }[];
   isError: boolean;
