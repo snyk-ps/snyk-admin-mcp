@@ -90,7 +90,7 @@ function assetPageText(data: Record<string, unknown>): string {
 
 export const searchAssets = defineTool({
   name: "snyk_search_assets",
-  description: "Search assets in a group using the Asset API (REST, Early Access). POST /groups/{group_id}/assets/search. Read-only. Provide an optional filter query, or omit it to list all assets. Supports cursor pagination via limit/starting_after/ending_before.",
+  description: "Search assets in a group using the Asset API (REST, Early Access). POST /groups/{group_id}/assets/search. Read-only. Provide an optional filter query, or omit it to list all assets. Supports cursor pagination via limit/starting_after/ending_before. Covers repository, image, and package assets; use this (not snyk_list_inventory_assets) to get IDs for snyk_get_asset and snyk_update_assets. Asset IDs here are 32-character hex (Asset API); the snyk_*_inventory_* tools use a separate Inventory API whose IDs are dashed UUIDs, and the two are not interchangeable. Labels and tags are separate between the two APIs as well.",
   schema: SearchAssetsArgsSchema,
   annotations: READ_ONLY,
   handler: async (parsed, config) => {
@@ -159,7 +159,7 @@ export const listRelatedAssets = defineTool({
 
 export const updateAssets = defineTool({
   name: "snyk_update_assets",
-  description: "Update class, labels, and/or tags on one or more assets (REST Asset API, Early Access). Issues one PATCH per asset — the Asset API has no batch endpoint — and reports per-asset success/failure, so a partial failure leaves earlier assets updated. Works for repository, image, and package assets; pass a single ID in asset_ids to update just one. Get asset_ids from snyk_search_assets. Use dry_run=true first, then dry_run=false with approval_token to apply.",
+  description: "Update class, labels, and/or tags on one or more assets (REST Asset API, Early Access). Issues one PATCH per asset — the Asset API has no batch endpoint — and reports per-asset success/failure, so a partial failure leaves earlier assets updated. Works for repository, image, and package assets; pass a single ID in asset_ids to update just one. Get asset_ids from snyk_search_assets. Asset IDs here are 32-character hex (Asset API); the snyk_*_inventory_* tools use a separate Inventory API whose IDs are dashed UUIDs, and the two are not interchangeable. Labels and tags are separate between the two APIs as well. For updating many repositories or images in single all-or-nothing requests, snyk_update_inventory_assets does that with Inventory IDs. Use dry_run=true first, then dry_run=false with approval_token to apply.",
   schema: UpdateAssetsArgsSchema,
   annotations: DESTRUCTIVE,
   handler: async (parsed, config) => {
