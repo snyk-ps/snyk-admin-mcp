@@ -29,6 +29,14 @@ export const ASSET_API_VERSION = "2026-03-25";
  */
 export const SECRETS_SETTINGS_API_VERSION = "2024-10-15~beta";
 
+/**
+ * Version for the Inventory Assets endpoints (Early Access). The spec lists them only under
+ * the `2024-10-15~beta` release, but unlike Secrets these endpoints reject a `~beta` suffix
+ * in the query (400: must match `^\d{4}-\d{2}-\d{2}$`). Requesting the plain date is what
+ * works: the API then serves `2024-10-15~beta` (verified live via `snyk-version-served`).
+ */
+export const INVENTORY_API_VERSION = "2024-10-15";
+
 /** Sanitize ID/path segment before use in API URLs to prevent SSRF. Returns validated string. */
 export function sanitizePathSegment(value: string, label: string): string {
   if (!value || typeof value !== "string") throw new Error(`Invalid ${label}`);

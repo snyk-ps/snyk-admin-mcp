@@ -14,6 +14,7 @@ import { cloneIntegration, copyOrgSettings, createOrganization, listIntegrations
 import { addProjectTags, moveProjects, removeProjectTags } from "./projects.js";
 import { searchAuditLogs } from "./audit.js";
 import { getAsset, listAssetProjects, listRelatedAssets, searchAssets, updateAssets } from "./assets.js";
+import { getInventoryAssetCounts, listInventoryAssets, listInventoryFields, updateInventoryAssets } from "./inventory.js";
 import { createCollection, listCollectionProjects, listCollections, updateCollection } from "./collections.js";
 
 export const TOOLS: readonly Tool[] = [
@@ -32,6 +33,10 @@ export const TOOLS: readonly Tool[] = [
   listAssetProjects,
   listRelatedAssets,
   updateAssets,
+  listInventoryAssets,
+  getInventoryAssetCounts,
+  listInventoryFields,
+  updateInventoryAssets,
   listCollections,
   listCollectionProjects,
   createCollection,
