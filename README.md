@@ -10,6 +10,7 @@ MCP server for managing the Snyk platform as a customer with group admin permiss
 - **Project tags** – Add or remove tags on many projects in one go.
 - **Move projects** – Move one or more projects from a source org to a target org.
 - **Asset labeling** – Search, look up, and label assets (class/labels/tags) — one at a time, or many at once. Covers repository, image, and package assets.
+- **Asset inventory** – Filter an org's or group's asset inventory (repositories, container images, SBOMs), count assets by any field (e.g. public vs private repos, assets per org), and label up to 100 assets per request. Early Access.
 - **Audit logs** – Search org or group audit logs by time range, user, project, or event type.
 - **Collections** – List collections and their projects, create collections, rename them, and add or remove projects in batches of 100.
 - **Dry run + approval** – Every mutation supports `dry_run=true` (default) to preview a plan first. Apply with `dry_run=false` and the `approval_token` returned from the dry run. Tokens expire after 10 minutes. The token guarantees that what's applied is exactly what was previewed; it is not a human sign-off — see [Workflow](#workflow-mutations).
@@ -99,6 +100,10 @@ Some clients differ in config file location or key name (for example, VS Code's 
 | `snyk_list_asset_projects` | List projects related to an asset, with cursor pagination. Read-only. |
 | `snyk_list_related_assets` | List assets related to an asset, with optional type filter and pagination. Read-only. |
 | `snyk_update_assets` | Update class, labels, and/or tags on one or more assets (repos included). One request per asset. Dry run / approval flow. |
+| `snyk_list_inventory_assets` | List or filter Inventory assets in an org or group (RSQL filter, sort, chosen fields), with the total count. Read-only. |
+| `snyk_get_inventory_asset_counts` | Count Inventory assets grouped by one field (e.g. `visibility`, `class`, `org_id`), optionally filtered. Read-only. |
+| `snyk_list_inventory_fields` | List the fields you can filter and group by, or suggested values for one field. Read-only. |
+| `snyk_update_inventory_assets` | Set class and add/remove labels and tags on Inventory assets, 100 per all-or-nothing request. Dry run / approval flow. |
 | `snyk_list_collections` | List collections in an org, with project and issue counts. Filter by name or `is_generated`; sort and paginate. Read-only. |
 | `snyk_list_collection_projects` | List the projects in a collection (IDs, targets, issue counts). Filter by target, integration, or with/without issues. Read-only. |
 | `snyk_create_collection` | Create a collection, optionally adding projects to it. Dry run / approval flow. |
@@ -114,6 +119,9 @@ Some clients differ in config file location or key name (for example, VS Code's 
 - **`snyk_copy_org_settings` copies four separate resources** – V1 org settings (only fields editable via `PUT /v1/org/{orgId}/settings`, e.g. `requestAccess`), SAST settings (Snyk Code enablement/autofix), Open Source language settings (per-ecosystem, e.g. npm/maven/pip), and Secrets settings (`secrets_enabled` — Early Access/beta) — the latter three via the REST API. Each is applied independently and reported per-step, so a failure on one (e.g. the beta Secrets endpoint) doesn't block the others; check the returned step list if the target org ends up partially configured. If the source org's Secrets settings can't be read at all (usually because the org doesn't have Snyk Secrets), the dry run says so and the Secrets step is skipped; the other three are still copied.
 - **Source and target must be different orgs** – `snyk_copy_org_settings`, `snyk_move_projects`, and `snyk_clone_integration` reject the same org ID as both source and target before making any API call; it almost always means the IDs were mixed up.
 - **Asset tools are group-scoped** – pass `group_id`, not an org ID (`snyk_list_orgs` returns each org's `group_id`).
+- **Two asset APIs, two ID formats** – the `snyk_*_inventory_*` tools use Snyk's Inventory Assets API; the other asset tools (`snyk_search_assets`, `snyk_get_asset`, `snyk_update_assets`, …) use the Asset API. They're separate stores with different IDs — Inventory IDs are dashed UUIDs (`01a19e5b-cbc5-…`), Asset API IDs are 32 hex characters (`6246f602…`) — and neither API accepts the other's (both return 404). `snyk_update_inventory_assets` rejects an Asset API ID with a pointer to `snyk_update_assets`. **Labels and tags are separate too**: verified live, a repo with 9 labels in the Asset API had none in Inventory, and a label added through Inventory never showed up in the Asset API. Pick the API whose labels your other tooling reads.
+- **When to use the Inventory tools** – for org-scoped listing, RSQL filters, counts by field, and updating many repositories or images in single all-or-nothing requests. Use the Asset API tools for package assets (Inventory has none) and for an asset's related projects and assets (Inventory's relationship endpoints returned empty lists live, so they aren't wrapped).
+- **Inventory updates are batched, all-or-nothing per batch** – `snyk_update_inventory_assets` sends up to 100 assets per request; the API applies each request completely or not at all, but separate requests are independent. Its dry run first looks every ID up (and fails if any is unknown), because one unknown ID would fail its whole request. It only uses `add`/`remove` for labels and tags, never the API's replace-everything form.
 - **Collections are org-scoped** – there is no group-level collection endpoint, so covering a whole group means one call per org. Projects must be in the collection's org.
 - **Generated collections** – Snyk creates one collection per imported repository, named after it (e.g. `github.com/org/repo`) and flagged `is_generated`. Pass `is_generated: false` to `snyk_list_collections` to see only the ones people made. `snyk_update_collection` warns in its dry run before changing a generated one.
 - **Collection changes are batched, not atomic** – the API takes up to 100 project IDs per add/remove request, so larger lists are split into batches and sent in order. If a batch fails, earlier batches stay applied; the result lists each step. For `snyk_create_collection`, the collection itself is kept even if adding projects fails.
@@ -137,7 +145,7 @@ To help clients do that, every tool is labelled in `tools/list` with MCP tool an
 |-------|-------|
 | Read-only (`readOnlyHint: true`) | all `list`, `get`, and `search` tools |
 | Additive (`destructiveHint: false`) | `snyk_add_project_tags`, `snyk_create_organization`, `snyk_create_collection` |
-| Destructive (`destructiveHint: true`) | `snyk_copy_org_settings`, `snyk_clone_integration`, `snyk_remove_project_tags`, `snyk_move_projects`, `snyk_update_assets`, `snyk_update_collection` |
+| Destructive (`destructiveHint: true`) | `snyk_copy_org_settings`, `snyk_clone_integration`, `snyk_remove_project_tags`, `snyk_move_projects`, `snyk_update_assets`, `snyk_update_inventory_assets`, `snyk_update_collection` |
 
 Clients that support annotations can run read-only tools freely and always confirm the rest. Annotations are hints; whether and how a client uses them depends on the client.
 
