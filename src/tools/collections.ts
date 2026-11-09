@@ -31,8 +31,8 @@ const ListCollectionsArgsSchema = z.object({
   sort: z.enum(["name", "projectsCount", "issues"]).optional().describe("Sort field"),
   direction: z.enum(["ASC", "DESC"]).optional().describe("Sort direction (API default DESC)"),
   limit: CollectionPageLimitSchema,
-  starting_after: z.string().optional().describe("Cursor from a previous response's next_starting_after"),
-  ending_before: z.string().optional().describe("Cursor from a previous response's prev_ending_before"),
+  starting_after: z.string().optional().describe("From next_starting_after"),
+  ending_before: z.string().optional().describe("From prev_ending_before"),
 });
 
 const ListCollectionProjectsArgsSchema = z.object({
@@ -44,8 +44,8 @@ const ListCollectionProjectsArgsSchema = z.object({
   sort: z.enum(["imported", "last_tested_at", "issues"]).optional().describe("Sort field"),
   direction: z.enum(["ASC", "DESC"]).optional().describe("Sort direction (API default DESC)"),
   limit: CollectionPageLimitSchema,
-  starting_after: z.string().optional().describe("Cursor from a previous response's next_starting_after"),
-  ending_before: z.string().optional().describe("Cursor from a previous response's prev_ending_before"),
+  starting_after: z.string().optional().describe("From next_starting_after"),
+  ending_before: z.string().optional().describe("From prev_ending_before"),
 });
 
 const CreateCollectionArgsSchema = z.object({
@@ -150,7 +150,7 @@ function membershipClean(check: MembershipCheck | null): boolean {
 
 export const listCollections = defineTool({
   name: "snyk_list_collections",
-  description: "List project collections in an organization (REST API, GA). Read-only. Collections are org-scoped — to cover a whole group, call this once per org. Each result includes its project count and summed critical/high/medium/low issue counts. Snyk auto-generates one collection per imported repository (is_generated=true); filter with is_generated=false to see only user-created ones. Supports name filter, sort, and cursor pagination.",
+  description: "List an org's project collections with project and issue counts (collections are per org: for a group, call once per org). Snyk makes one per imported repo (is_generated=true); is_generated=false shows only people-made ones. Filter by name, sort, and page. Read-only.",
   schema: ListCollectionsArgsSchema,
   annotations: READ_ONLY,
   handler: async (a, config) => {
@@ -195,7 +195,7 @@ export const listCollections = defineTool({
 
 export const listCollectionProjects = defineTool({
   name: "snyk_list_collection_projects",
-  description: "List the projects in a collection (REST API, GA). Read-only. Returns project IDs, target IDs, issue counts, and import/last-tested times — not project names (use snyk_list_projects for those). Filter by target, integration type, or with/without issues. Supports sort and cursor pagination.",
+  description: "List a collection's projects: IDs, target IDs, issue counts, import and last-test times, but not names (snyk_list_projects has those). Filter by target, integration, or with/without issues; sort and page. Read-only.",
   schema: ListCollectionProjectsArgsSchema,
   annotations: READ_ONLY,
   handler: async (a, config) => {
@@ -232,7 +232,7 @@ export const listCollectionProjects = defineTool({
 
 export const createCollection = defineTool({
   name: "snyk_create_collection",
-  description: "Create a project collection in an organization, optionally adding projects to it right away (REST API, GA). Projects must already be in that org. Adds are sent in batches of 100; not atomic — if a batch fails, the collection still exists with the earlier batches in it. The API silently ignores unknown project IDs and projects from other orgs, so after adding, this re-reads the collection and reports any project that didn't get added. Requires the org.collection.create and org.collection.edit permissions. Use dry_run=true first, then dry_run=false with approval_token to apply.",
+  description: "Create a collection in an org, optionally adding projects from that org (100 per request; not atomic). The API silently skips unknown IDs and other orgs' projects, so the tool re-reads the collection and reports any that weren't added. Use dry_run=true first, then dry_run=false with approval_token to apply.",
   schema: CreateCollectionArgsSchema,
   annotations: ADDITIVE,
   handler: async (parsed, config) => {
@@ -283,7 +283,7 @@ export const createCollection = defineTool({
 
 export const updateCollection = defineTool({
   name: "snyk_update_collection",
-  description: "Rename a collection and/or add or remove projects in it (REST API, GA). Provide at least one of name, add_project_ids, or remove_project_ids. Adds/removes are sent in batches of 100 and applied in order (rename, adds, removes); not atomic — earlier steps stay applied if a later one fails. The API silently ignores unknown project IDs and projects from other orgs, so after changing membership this re-reads the collection and reports any ID that didn't take effect. Requires org.collection.edit. Use dry_run=true first, then dry_run=false with approval_token to apply.",
+  description: "Rename a collection and/or add or remove its projects (in that order, 100 per request; not atomic). The API silently skips unknown IDs and other orgs' projects, so the tool re-reads the collection and reports any that didn't change. Use dry_run=true first, then dry_run=false with approval_token to apply.",
   schema: UpdateCollectionArgsSchema,
   annotations: DESTRUCTIVE,
   handler: async (parsed, config) => {

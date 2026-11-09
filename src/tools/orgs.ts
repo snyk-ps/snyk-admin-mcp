@@ -9,13 +9,13 @@ import { sanitizePathSegment } from "../snyk/types.js";
 import { runMutationTool } from "../mutation.js";
 import { ADDITIVE, DESTRUCTIVE, READ_ONLY, defineTool } from "./types.js";
 import { sameOrgError } from "./guards.js";
-import { formatOrgId, formatIntegrationId } from "./format.js";
+import { describeProject, formatOrgId, formatIntegrationId, nextPageHint, pageCursors, pageLimitStep10 } from "./format.js";
 
 // --- List orgs (REST) ---
 const ListOrgsArgsSchema = z.object({
-  limit: z.number().optional().describe("Number of results per page (API default: 10)"),
-  starting_after: z.string().optional().describe("Return results after this cursor (next_starting_after from a previous response)"),
-  ending_before: z.string().optional().describe("Return results before this cursor (prev_ending_before from a previous response)"),
+  limit: pageLimitStep10(),
+  starting_after: z.string().optional().describe("From next_starting_after"),
+  ending_before: z.string().optional().describe("From prev_ending_before"),
   group_id: z.string().optional().describe("Filter: only return orgs within this group"),
   is_personal: z.boolean().optional().describe("Filter: if true, only return orgs not part of any group"),
   slug: z.string().optional().describe("Filter: only return orgs whose slug exactly matches this value"),
@@ -28,8 +28,28 @@ const ListIntegrationsArgsSchema = z.object({
 });
 
 // --- List projects (REST) ---
+/** A tag filter is `key:value`; the spec's pattern requires both parts. */
+const ProjectTagFilterSchema = z.object({
+  key: z.string().regex(/^[a-zA-Z0-9_-]+$/, "Tag keys are letters, digits, _ and -"),
+  value: z.string().regex(/^[:/?#@&+=%a-zA-Z0-9_.~-]+$/, "Tag values are letters, digits, and :/?#@&+=%_.~-"),
+});
 const ListProjectsArgsSchema = z.object({
   org_id: z.string().describe("Organization ID"),
+  names: z.array(z.string()).optional().describe("Only projects with exactly these names"),
+  names_start_with: z.array(z.string()).optional().describe("Only projects whose name starts with one of these, e.g. a repo: \"my-org/my-repo\""),
+  tags: z.array(ProjectTagFilterSchema).optional().describe("Only projects that have every one of these tags"),
+  origins: z.array(z.string()).optional().describe("Only these origins, e.g. github, github-cloud-app, gitlab, cli, docker-hub"),
+  types: z.array(z.string()).optional().describe("Only these project types, e.g. npm, maven, sast, deb, terraformconfig"),
+  target_id: z.array(z.guid()).optional().describe("Only projects in these targets"),
+  target_reference: z.string().optional().describe("Only this branch or tag, e.g. main"),
+  business_criticality: z.array(z.enum(rest.PROJECT_BUSINESS_CRITICALITY)).optional().describe("Only projects with all of these"),
+  environment: z.array(z.enum(rest.PROJECT_ENVIRONMENT)).optional().describe("Only projects with all of these"),
+  lifecycle: z.array(z.enum(rest.PROJECT_LIFECYCLE)).optional().describe("Only projects with all of these"),
+  include_issue_counts: z.boolean().optional().describe("Add each project's latest critical/high/medium/low counts"),
+  count_only: z.boolean().optional().describe("Return only how many projects match"),
+  limit: pageLimitStep10("default 100 here"),
+  starting_after: z.string().optional().describe("From next_starting_after"),
+  ending_before: z.string().optional().describe("From prev_ending_before"),
 });
 
 // --- Copy org settings ---
@@ -122,13 +142,43 @@ export const listIntegrations = defineTool({
 
 export const listProjects = defineTool({
   name: "snyk_list_projects",
-  description: "List projects for an organization (REST API). Read-only.",
+  description: "List an org's projects, one line each: name, ID, type, origin, branch, criticality/environment/lifecycle, and tags. Filter by name or name prefix (e.g. a repo), tags, origin, type, target, branch, or attributes; count_only returns just the number. Up to 100 per page; follow next_starting_after for more. Use it to find project IDs for the tag, move, collection, and snyk_update_projects tools. Read-only.",
   schema: ListProjectsArgsSchema,
   annotations: READ_ONLY,
-  handler: async ({ org_id }, config) => {
-    const data = await rest.listProjects(config, sanitizePathSegment(org_id, "org_id"));
+  handler: async (a, config) => {
+    const orgId = sanitizePathSegment(a.org_id, "org_id");
+    const filters = {
+      names: a.names,
+      names_start_with: a.names_start_with,
+      tags: a.tags?.map((t) => `${t.key}:${t.value}`),
+      origins: a.origins,
+      types: a.types,
+      target_id: a.target_id,
+      target_reference: a.target_reference,
+      business_criticality: a.business_criticality,
+      environment: a.environment,
+      lifecycle: a.lifecycle,
+    };
+    const orgLabel = await formatOrgId(config, orgId);
+    const filtered = Object.values(filters).some((v) => (Array.isArray(v) ? v.length : v));
+    const matching = filtered ? " matching the filters" : "";
+    if (a.count_only) {
+      const data = await rest.listProjects(config, orgId, { ...filters, count_only: true });
+      return { content: [{ type: "text", text: `${data.meta?.count ?? "Unknown number of"} project(s) in ${orgLabel}${matching}.` }], isError: false };
+    }
+    const data = await rest.listProjects(config, orgId, {
+      ...filters,
+      latest_issue_counts: a.include_issue_counts,
+      limit: a.limit ?? 100,
+      starting_after: a.starting_after,
+      ending_before: a.ending_before,
+    });
+    const projects = data.data ?? [];
+    const pagination = pageCursors(data.links);
+    const header = `${projects.length} project(s) in ${orgLabel}${matching}${pagination.next_starting_after ? " (more on the next page)" : ""}:`;
+    const body = projects.length ? projects.map(describeProject).join("\n") : "No projects.";
     return {
-      content: [{ type: "text", text: JSON.stringify(data, null, 2) }],
+      content: [{ type: "text", text: `${header}\n\n${body}${nextPageHint(pagination.next_starting_after)}` }],
       isError: false,
     };
   },

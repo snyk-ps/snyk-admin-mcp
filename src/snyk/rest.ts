@@ -90,8 +90,10 @@ export async function getDefaultGroupId(config: SnykApiConfig): Promise<string |
     const res = await listOrgs(config, { limit: 100, starting_after: cursor });
     const withGroup = (res.data ?? []).find((org) => org.attributes?.group_id);
     if (withGroup) return withGroup.attributes?.group_id ?? null;
-    if (!res.links?.next) break;
-    cursor = res.links.next;
+    // links.next is a whole relative URL; only its starting_after value is a cursor.
+    const next = cursorFromLink(res.links?.next, "starting_after");
+    if (!next) break;
+    cursor = next;
   }
   return null;
 }
@@ -127,15 +129,196 @@ export async function getOrgName(config: SnykApiConfig, orgId: string): Promise<
   return name;
 }
 
-/** List projects for an org (REST API). GET /orgs/{org_id}/projects. */
-export async function listProjects(
-  config: SnykApiConfig,
-  orgId: string
-): Promise<{ data: { id: string; attributes?: { name?: string } }[] }> {
+/** Project attributes that classify a project. Each is a list; a PATCH replaces the whole list. */
+export const PROJECT_BUSINESS_CRITICALITY = ["critical", "high", "medium", "low"] as const;
+export const PROJECT_ENVIRONMENT = ["frontend", "backend", "internal", "external", "mobile", "saas", "onprem", "hosted", "distributed"] as const;
+export const PROJECT_LIFECYCLE = ["production", "development", "sandbox"] as const;
+export const PROJECT_TEST_FREQUENCY = ["daily", "weekly", "never"] as const;
+
+/** One project from `GET /orgs/{org_id}/projects` (only the fields this server reads). */
+export type ProjectResource = {
+  id: string;
+  type?: string;
+  attributes?: {
+    name?: string;
+    type?: string;
+    target_file?: string;
+    target_reference?: string;
+    origin?: string;
+    created?: string;
+    status?: string;
+    business_criticality?: string[];
+    environment?: string[];
+    lifecycle?: string[];
+    tags?: { key: string; value: string }[];
+    settings?: { recurring_tests?: { frequency?: string } };
+  } & Record<string, unknown>;
+  relationships?: {
+    target?: { data?: { id?: string } };
+    owner?: { data?: { id?: string } | null };
+  } & Record<string, unknown>;
+  meta?: { latest_issue_counts?: { critical?: number; high?: number; medium?: number; low?: number } } & Record<string, unknown>;
+};
+export type ListProjectsResponse = { data: ProjectResource[]; links?: PageLinks; meta?: { count?: number } };
+
+/** Filters and paging for listProjects. Array filters are sent comma-separated (`style: form, explode: false`). */
+export type ListProjectsOptions = {
+  limit?: number;
+  starting_after?: string;
+  ending_before?: string;
+  ids?: string[];
+  names?: string[];
+  names_start_with?: string[];
+  origins?: string[];
+  types?: string[];
+  target_id?: string[];
+  target_reference?: string;
+  /** "key:value" strings; a project must have every one. */
+  tags?: string[];
+  business_criticality?: string[];
+  environment?: string[];
+  lifecycle?: string[];
+  latest_issue_counts?: boolean;
+  count_only?: boolean;
+};
+
+/** List projects for an org (REST API). GET /orgs/{org_id}/projects, with filters and cursor paging. */
+export async function listProjects(config: SnykApiConfig, orgId: string, opts: ListProjectsOptions = {}): Promise<ListProjectsResponse> {
   const safeOrgId = sanitizePathSegment(orgId, "org_id");
-  const res = await restFetch(config, `/orgs/${safeOrgId}/projects`);
+  const search = new URLSearchParams();
+  const csv = (key: string, values?: string[]) => { if (values?.length) search.append(key, values.join(",")); };
+  csv("ids", opts.ids);
+  csv("names", opts.names);
+  csv("names_start_with", opts.names_start_with);
+  csv("origins", opts.origins);
+  csv("types", opts.types);
+  csv("tags", opts.tags);
+  csv("business_criticality", opts.business_criticality);
+  csv("environment", opts.environment);
+  csv("lifecycle", opts.lifecycle);
+  // target_id is the one array filter without `explode: false`, so it's a repeated key.
+  for (const t of opts.target_id ?? []) search.append("target_id", t);
+  if (opts.target_reference) search.append("target_reference", opts.target_reference);
+  if (opts.latest_issue_counts) search.append("meta.latest_issue_counts", "true");
+  if (opts.count_only) search.append("meta_count", "only");
+  if (opts.limit !== undefined) search.append("limit", String(opts.limit));
+  if (opts.starting_after) search.append("starting_after", opts.starting_after);
+  if (opts.ending_before) search.append("ending_before", opts.ending_before);
+  const qs = encodeQuery(search);
+  const res = await restFetch(config, `/orgs/${safeOrgId}/projects${qs ? `?${qs}` : ""}`);
   if (!res.ok) throw new Error(`REST listProjects failed: ${res.status} ${await res.text()}`);
-  return res.json() as Promise<{ data: { id: string; attributes?: { name?: string } }[] }>;
+  return res.json() as Promise<ListProjectsResponse>;
+}
+
+/** The `ids` filter is sent in the URL, so look IDs up in batches of this many (also the max page size). */
+const PROJECT_LOOKUP_BATCH = 100;
+
+/**
+ * Look up projects by ID in one org: returns the ones found (keyed by lowercase ID) and the IDs
+ * that aren't in that org. Used by dry runs so a typo or a project from another org is caught
+ * before an approval token is issued, rather than failing part-way through the apply.
+ */
+export async function findProjectsByIds(
+  config: SnykApiConfig,
+  orgId: string,
+  ids: string[]
+): Promise<{ found: Map<string, ProjectResource>; missing: string[] }> {
+  const found = new Map<string, ProjectResource>();
+  const unique = [...new Set(ids.map((id) => id.toLowerCase()))];
+  for (let i = 0; i < unique.length; i += PROJECT_LOOKUP_BATCH) {
+    const batch = unique.slice(i, i + PROJECT_LOOKUP_BATCH);
+    const page = await listProjects(config, orgId, { ids: batch, limit: PROJECT_LOOKUP_BATCH });
+    for (const p of page.data ?? []) found.set(p.id.toLowerCase(), p);
+  }
+  return { found, missing: ids.filter((id) => !found.has(id.toLowerCase())) };
+}
+
+/** What snyk_update_projects can change. Omitted fields are left as they are. */
+export type ProjectUpdate = {
+  business_criticality?: string[];
+  environment?: string[];
+  lifecycle?: string[];
+  test_frequency?: string;
+  /** A user ID to set the owner, or null to clear it. Omit to leave the owner unchanged. */
+  owner_user_id?: string | null;
+};
+
+/**
+ * Update one project's attributes and/or owner (REST API, GA). PATCH /orgs/{org_id}/projects/{project_id}.
+ * Each attribute list replaces the project's current list. Tags are deliberately not sent here:
+ * the same PATCH would replace every tag, and the add/remove tag tools already cover tags.
+ */
+export async function updateProject(config: SnykApiConfig, orgId: string, projectId: string, update: ProjectUpdate): Promise<ProjectResource> {
+  const safeOrgId = sanitizePathSegment(orgId, "org_id");
+  const safeProjectId = sanitizePathSegment(projectId, "project_id");
+  const attributes: Record<string, unknown> = {};
+  if (update.business_criticality !== undefined) attributes.business_criticality = update.business_criticality;
+  if (update.environment !== undefined) attributes.environment = update.environment;
+  if (update.lifecycle !== undefined) attributes.lifecycle = update.lifecycle;
+  if (update.test_frequency !== undefined) attributes.test_frequency = update.test_frequency;
+  // The spec makes `relationships` required on the body; it's sent empty unless the owner changes.
+  const relationships: Record<string, unknown> = {};
+  if (update.owner_user_id !== undefined) relationships.owner = { data: { type: "user", id: update.owner_user_id } };
+  const res = await restFetch(config, `/orgs/${safeOrgId}/projects/${safeProjectId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ data: { type: "project", id: safeProjectId, attributes, relationships } }),
+  });
+  if (!res.ok) throw new Error(`REST updateProject failed: ${res.status} ${await res.text()}`);
+  const body = (await res.json()) as { data: ProjectResource };
+  return body.data;
+}
+
+// --- Memberships (GA): who is in an org or group, and with which role ---
+
+/** One membership. The API embeds the user's name/email and the role's name in `relationships`. */
+export type MembershipResource = {
+  id: string;
+  type?: string;
+  attributes?: { created_at?: string } & Record<string, unknown>;
+  relationships?: {
+    user?: { data?: { id?: string; attributes?: { name?: string; email?: string; username?: string; login_method?: string } } };
+    role?: { data?: { id?: string; attributes?: { name?: string } } };
+  } & Record<string, unknown>;
+};
+export type ListMembershipsResponse = { data: MembershipResource[]; links?: PageLinks; meta?: Record<string, unknown> };
+
+/**
+ * List memberships of an org or group. GET /orgs/{org_id}/memberships or /groups/{group_id}/memberships.
+ * `sort_by: "role"` is translated per scope: the org endpoint calls the column `role`, the
+ * group endpoint `role_name`.
+ */
+export async function listMemberships(
+  config: SnykApiConfig,
+  scope: "orgs" | "groups",
+  scopeId: string,
+  opts: {
+    email?: string;
+    username?: string;
+    user_id?: string;
+    role_name?: string;
+    sort_by?: "username" | "user_display_name" | "email" | "login_method" | "role";
+    sort_order?: "ASC" | "DESC";
+    limit?: number;
+    starting_after?: string;
+    ending_before?: string;
+  } = {}
+): Promise<ListMembershipsResponse> {
+  const safeId = sanitizePathSegment(scopeId, scope === "orgs" ? "org_id" : "group_id");
+  const sortBy = opts.sort_by === "role" && scope === "groups" ? "role_name" : opts.sort_by;
+  const qs = buildQuery({
+    email: opts.email,
+    username: opts.username,
+    user_id: opts.user_id,
+    role_name: opts.role_name,
+    sort_by: sortBy,
+    sort_order: opts.sort_order,
+    limit: opts.limit,
+    starting_after: opts.starting_after,
+    ending_before: opts.ending_before,
+  });
+  const res = await restFetch(config, `/${scope}/${safeId}/memberships${qs}`);
+  if (!res.ok) throw new Error(`REST listMemberships failed: ${res.status} ${await res.text()}`);
+  return res.json() as Promise<ListMembershipsResponse>;
 }
 
 /** One audit log entry, per the OpenAPI spec's `AuditLogSearch.items` shape. */
@@ -190,7 +373,7 @@ export async function searchAuditLogs(
   if (opts.size !== undefined) search.append("size", String(opts.size));
   if (opts.sort_order) search.append("sort_order", opts.sort_order);
   if (opts.cursor) search.append("cursor", opts.cursor);
-  const qs = search.toString();
+  const qs = encodeQuery(search);
   const res = await restFetch(config, `/${scope}/${safeId}/audit_logs/search${qs ? `?${qs}` : ""}`);
   if (!res.ok) throw new Error(`REST searchAuditLogs failed: ${res.status} ${await res.text()}`);
   return res.json() as Promise<AuditLogSearchResponse>;
@@ -392,8 +575,18 @@ function buildQuery(params: Record<string, string | number | undefined>): string
   for (const [key, value] of Object.entries(params)) {
     if (value !== undefined && value !== "") search.append(key, String(value));
   }
-  const qs = search.toString();
+  const qs = encodeQuery(search);
   return qs ? `?${qs}` : "";
+}
+
+/**
+ * Serialize query params with spaces as %20. URLSearchParams writes a space as `+`, and some
+ * Snyk endpoints reject that: GET /orgs/{id}/collections?name=a+b answers 400 "Parameter 'name'
+ * must be url encoded" (verified live), so a collection name with a space couldn't be searched
+ * or created. A literal `+` in a value is already written as %2B, so every `+` here is a space.
+ */
+export function encodeQuery(search: URLSearchParams): string {
+  return search.toString().replace(/\+/g, "%20");
 }
 
 /**
@@ -434,6 +627,21 @@ export async function getAsset(
   });
   if (!res.ok) throw new Error(`REST getAsset failed: ${res.status} ${await res.text()}`);
   return res.json() as Promise<Record<string, unknown>>;
+}
+
+/** An asset's type and name, or null when the group has no asset with this ID (404). Used to check IDs in dry runs. */
+export async function findAsset(
+  config: SnykApiConfig,
+  groupId: string,
+  assetId: string
+): Promise<{ id: string; type: string; name: string | null } | null> {
+  const safeGroupId = sanitizePathSegment(groupId, "group_id");
+  const safeAssetId = sanitizePathSegment(assetId, "asset_id");
+  const res = await restFetch(config, `/groups/${safeGroupId}/assets/${safeAssetId}`, { version: ASSET_API_VERSION });
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`REST getAsset failed: ${res.status} ${await res.text()}`);
+  const body = (await res.json()) as { data?: { id?: string; type?: string; attributes?: { name?: string } } };
+  return { id: body.data?.id ?? safeAssetId, type: body.data?.type ?? "unknown", name: body.data?.attributes?.name ?? null };
 }
 
 /** List projects related to an asset (Early Access). GET /groups/{group_id}/assets/{asset_id}/relationships/projects. */
@@ -681,7 +889,7 @@ export async function listCollectionProjects(
   for (const t of opts.target_id ?? []) search.append("target_id", t);
   for (const s of opts.show ?? []) search.append("show", s);
   for (const i of opts.integration ?? []) search.append("integration", i);
-  const qs = search.toString();
+  const qs = encodeQuery(search);
   const res = await restFetch(
     config,
     `/orgs/${safeOrgId}/collections/${safeCollectionId}/relationships/projects${qs ? `?${qs}` : ""}`

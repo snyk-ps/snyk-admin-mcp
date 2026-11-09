@@ -19,7 +19,7 @@
  *   `relationships/projects|targets` endpoints return empty lists even for repos with projects,
  *   so this client doesn't wrap them.
  */
-import { cursorFromLink, restFetch, type PageLinks } from "./rest.js";
+import { cursorFromLink, encodeQuery, restFetch, type PageLinks } from "./rest.js";
 import { INVENTORY_API_VERSION, sanitizePathSegment, type SnykApiConfig } from "./types.js";
 
 /** Which inventory to address: an org's or a group's. */
@@ -86,7 +86,7 @@ function appendPage(search: URLSearchParams, page: Page): void {
 }
 
 async function inventoryGet<T>(config: SnykApiConfig, path: string, search: URLSearchParams, label: string): Promise<T> {
-  const qs = search.toString();
+  const qs = encodeQuery(search);
   const res = await restFetch(config, `${path}${qs ? `?${qs}` : ""}`, { version: INVENTORY_API_VERSION });
   if (!res.ok) throw new Error(`REST ${label} failed: ${res.status} ${await res.text()}`);
   return res.json() as Promise<T>;
