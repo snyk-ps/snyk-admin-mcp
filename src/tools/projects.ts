@@ -131,10 +131,14 @@ export const removeProjectTags = defineTool({
       describeDryRun: async (data) => {
         const totalOperations = data.project_ids.length * data.tag_keys.length;
         const where = await formatOrgId(config, data.org_id);
-        const without = data.projects.filter((p) => p.has.length === 0).length;
-        const lines = data.projects.map((p) => `- ${p.name} (${p.id}): ${p.has.length ? `removes ${p.has.join(", ")}` : "has none of these keys"}`);
-        const note = without ? `\n\n${without} project(s) have none of these keys; removing from them changes nothing.` : "";
-        return `Dry run – will remove tag key(s) ${data.tag_keys.join(", ")} from ${data.project_ids.length} project(s) in ${where} (${totalOperations} V1 calls).\n\n${capped(lines)}${note}\n\nPlan:\n${JSON.stringify({ org_id: data.org_id, project_ids: data.project_ids, tag_keys: data.tag_keys }, null, 2)}`;
+        // Projects that actually lose a tag come first, so they can't be pushed out of the capped list.
+        const withKeys = data.projects.filter((p) => p.has.length > 0);
+        const without = data.projects.filter((p) => p.has.length === 0);
+        const lines = withKeys.map((p) => `- ${p.name} (${p.id}): removes ${p.has.join(", ")}`);
+        const note = without.length
+          ? `\n\n${without.length} project(s) have none of these keys; removing from them changes nothing: ${without.slice(0, 10).map((p) => p.name).join(", ")}${without.length > 10 ? `, …and ${without.length - 10} more` : ""}`
+          : "";
+        return `Dry run – will remove tag key(s) ${data.tag_keys.join(", ")} from ${data.project_ids.length} project(s) in ${where} (${totalOperations} V1 calls).${lines.length ? `\n\n${capped(lines)}` : ""}${note}\n\nPlan:\n${JSON.stringify({ org_id: data.org_id, project_ids: data.project_ids, tag_keys: data.tag_keys }, null, 2)}`;
       },
       apply: async (data) => {
         const safeOrgId = sanitizePathSegment(data.org_id, "org_id");
@@ -287,11 +291,17 @@ export const updateProjects = defineTool({
       describeDryRun: async (data) => {
         const where = await formatOrgId(config, data.org_id);
         const toChange = data.changes.filter((c) => c.changes.length);
-        const lines = data.changes.map((c) => `- ${c.name} (${c.id}): ${c.changes.length ? c.changes.join("; ") : "no change — skipped"}`);
+        const unchanged = data.changes.filter((c) => !c.changes.length);
+        // The projects that will change come first, so the capped list can't fill up with
+        // "no change" lines and push them out of sight; the unchanged ones are summarized.
+        const lines = toChange.map((c) => `- ${c.name} (${c.id}): ${c.changes.join("; ")}`);
         const head = toChange.length
           ? `Dry run – will update ${toChange.length} of ${data.changes.length} project(s) in ${where} (one PATCH each; not atomic).`
           : `Dry run – nothing to change: all ${data.changes.length} project(s) in ${where} already have these values.`;
-        return `${head}\n\n${capped(lines)}\n\nPlan:\n${JSON.stringify({ org_id: data.org_id, update: data.update, project_ids: toChange.map((c) => c.id) }, null, 2)}`;
+        const skipped = unchanged.length && toChange.length
+          ? `\n\nSkipped, already set (${unchanged.length}): ${unchanged.slice(0, 10).map((c) => c.name).join(", ")}${unchanged.length > 10 ? `, …and ${unchanged.length - 10} more` : ""}`
+          : "";
+        return `${head}${lines.length ? `\n\n${capped(lines)}` : ""}${skipped}\n\nPlan:\n${JSON.stringify({ org_id: data.org_id, update: data.update, project_ids: toChange.map((c) => c.id) }, null, 2)}`;
       },
       apply: async (data) => {
         const toChange = data.changes.filter((c) => c.changes.length);

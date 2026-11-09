@@ -33,13 +33,18 @@ const ProjectTagFilterSchema = z.object({
   key: z.string().regex(/^[a-zA-Z0-9_-]+$/, "Tag keys are letters, digits, _ and -"),
   value: z.string().regex(/^[:/?#@&+=%a-zA-Z0-9_.~-]+$/, "Tag values are letters, digits, and :/?#@&+=%_.~-"),
 });
+/**
+ * Snyk sends these filters comma-separated (`explode: false`), so a value containing a comma
+ * would silently become two values. Rejected instead, with the reason.
+ */
+const NoCommaSchema = z.string().min(1).refine((v) => !v.includes(","), "Can't contain a comma: Snyk splits this filter on commas");
 const ListProjectsArgsSchema = z.object({
   org_id: z.string().describe("Organization ID"),
-  names: z.array(z.string()).optional().describe("Only projects with exactly these names"),
-  names_start_with: z.array(z.string()).optional().describe("Only projects whose name starts with one of these, e.g. a repo: \"my-org/my-repo\""),
+  names: z.array(NoCommaSchema).optional().describe("Only projects with exactly these names"),
+  names_start_with: z.array(NoCommaSchema).optional().describe("Only projects whose name starts with one of these. For one repo's projects use \"owner/repo(\": the \"(\" stops a sibling repo such as owner/repo-api from matching too. Or filter by target_id"),
   tags: z.array(ProjectTagFilterSchema).optional().describe("Only projects that have every one of these tags"),
-  origins: z.array(z.string()).optional().describe("Only these origins, e.g. github, github-cloud-app, gitlab, cli, docker-hub"),
-  types: z.array(z.string()).optional().describe("Only these project types, e.g. npm, maven, sast, deb, terraformconfig"),
+  origins: z.array(NoCommaSchema).optional().describe("Only these origins, e.g. github, github-cloud-app, gitlab, cli, docker-hub"),
+  types: z.array(NoCommaSchema).optional().describe("Only these project types, e.g. npm, maven, sast, deb, terraformconfig"),
   target_id: z.array(z.guid()).optional().describe("Only projects in these targets"),
   target_reference: z.string().optional().describe("Only this branch or tag, e.g. main"),
   business_criticality: z.array(z.enum(rest.PROJECT_BUSINESS_CRITICALITY)).optional().describe("Only projects with all of these"),
@@ -49,7 +54,6 @@ const ListProjectsArgsSchema = z.object({
   count_only: z.boolean().optional().describe("Return only how many projects match"),
   limit: pageLimitStep10("default 100 here"),
   starting_after: z.string().optional().describe("From next_starting_after"),
-  ending_before: z.string().optional().describe("From prev_ending_before"),
 });
 
 // --- Copy org settings ---
@@ -80,7 +84,7 @@ const CreateOrganizationArgsSchema = z.object({
 
 export const listOrgs = defineTool({
   name: "snyk_list_orgs",
-  description: "List organizations accessible to the token (REST API). Read-only. Supports cursor pagination and filters. Returns next_starting_after to pass as starting_after for the next page.",
+  description: "List organizations accessible to the token, with each org's group_id (which the group-scoped tools need). Filter by group, name, slug, or personal; returns next_starting_after for the next page. Read-only.",
   schema: ListOrgsArgsSchema,
   annotations: READ_ONLY,
   handler: async (a, config) => {
@@ -171,7 +175,6 @@ export const listProjects = defineTool({
       latest_issue_counts: a.include_issue_counts,
       limit: a.limit ?? 100,
       starting_after: a.starting_after,
-      ending_before: a.ending_before,
     });
     const projects = data.data ?? [];
     const pagination = pageCursors(data.links);
@@ -228,7 +231,7 @@ export const createOrganization = defineTool({
 
 export const copyOrgSettings = defineTool({
   name: "snyk_copy_org_settings",
-  description: "Copy organization settings from a source org to a target org: V1 org settings (e.g. requestAccess) via Snyk's V1 API, plus SAST settings (Snyk Code enablement/autofix), Open Source language settings, and Secrets settings (all via the REST API; Secrets settings is Early Access/beta). Always run with dry_run=true first to get a plan and approval_token, then run with dry_run=false and approval_token to apply.",
+  description: "Copy organization settings from a source org to a target org: V1 org settings (e.g. requestAccess) via Snyk's V1 API, plus SAST settings (whether Snyk Code is on), Open Source language settings, and Secrets settings (all via the REST API; Secrets settings is Early Access/beta). Always run with dry_run=true first to get a plan and approval_token, then run with dry_run=false and approval_token to apply.",
   schema: CopySettingsArgsSchema,
   annotations: DESTRUCTIVE,
   handler: async (parsed, config) => {

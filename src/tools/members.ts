@@ -19,7 +19,6 @@ const ListMembersArgsSchema = z.object({
   sort_order: z.enum(["ASC", "DESC"]).optional(),
   limit: pageLimitStep10("default 100 here"),
   starting_after: z.string().optional().describe("From next_starting_after"),
-  ending_before: z.string().optional().describe("From prev_ending_before"),
 });
 
 function describeMember(m: rest.MembershipResource): string {
@@ -51,7 +50,6 @@ export const listMembers = defineTool({
       sort_order: a.sort_order,
       limit: a.limit ?? 100,
       starting_after: a.starting_after,
-      ending_before: a.ending_before,
     });
     const members = data.data ?? [];
     const pagination = pageCursors(data.links);

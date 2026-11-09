@@ -212,6 +212,8 @@ export async function listProjects(config: SnykApiConfig, orgId: string, opts: L
 
 /** The `ids` filter is sent in the URL, so look IDs up in batches of this many (also the max page size). */
 const PROJECT_LOOKUP_BATCH = 100;
+/** 8-4-4-4-12 hex, any version — the shape every Snyk project ID has. */
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
  * Look up projects by ID in one org: returns the ones found (keyed by lowercase ID) and the IDs
@@ -224,7 +226,10 @@ export async function findProjectsByIds(
   ids: string[]
 ): Promise<{ found: Map<string, ProjectResource>; missing: string[] }> {
   const found = new Map<string, ProjectResource>();
-  const unique = [...new Set(ids.map((id) => id.toLowerCase()))];
+  // Project IDs are UUIDs, and the `ids` filter is `format: uuid`: a single malformed ID makes
+  // the whole lookup 400 ("Parameter 'ids' must be url encoded", verified live) instead of naming
+  // it. So malformed IDs aren't sent; they come back as missing, by name, like any unknown ID.
+  const unique = [...new Set(ids.map((id) => id.toLowerCase()))].filter((id) => UUID_PATTERN.test(id));
   for (let i = 0; i < unique.length; i += PROJECT_LOOKUP_BATCH) {
     const batch = unique.slice(i, i + PROJECT_LOOKUP_BATCH);
     const page = await listProjects(config, orgId, { ids: batch, limit: PROJECT_LOOKUP_BATCH });
