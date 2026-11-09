@@ -10,9 +10,13 @@ import { readFileSync } from "fs";
 import { fileURLToPath } from "url";
 import { config as loadEnv } from "dotenv";
 
-// Load .env from project root (one level up from dist/)
+// Load .env from project root (one level up from dist/). `quiet` and `debug` are set
+// explicitly because stdout is the MCP protocol channel: dotenv 18 reads DOTENV_CONFIG_DEBUG
+// from the environment and, if it's set, prints debug lines to stdout ahead of the first
+// JSON-RPC message, which breaks the client connection. Explicit options take precedence
+// over those env vars. `quiet` also drops its "injected env" line from stderr.
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-loadEnv({ path: path.join(__dirname, "..", ".env") });
+loadEnv({ path: path.join(__dirname, "..", ".env"), quiet: true, debug: false });
 
 /** Read from package.json so the version clients see in the MCP handshake can't drift from the release. */
 const { version: SERVER_VERSION } = JSON.parse(
