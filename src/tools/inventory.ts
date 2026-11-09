@@ -19,10 +19,10 @@ import { formatOrgId, pageCursors } from "./format.js";
 
 /** Shared lead-in for every description, so a caller can't miss which asset store this is. */
 const INVENTORY_NOTE =
-  "Inventory Assets API (Early Access) — a separate asset store from the Asset API tools (snyk_search_assets, snyk_get_asset, snyk_update_assets). " +
-  "Its asset IDs are dashed UUIDs; theirs are 32-character hex; neither API accepts the other's IDs. " +
-  "Labels and tags are separate too: values set here don't appear in the Asset API, or the other way round. " +
-  "Covers repositories, container images, and SBOMs (not package assets), at org or group scope.";
+  "Inventory API (Early Access): a separate asset store from the Asset API tools (snyk_search_assets, snyk_update_assets) — its IDs are dashed UUIDs, not their 32-hex IDs, and labels and tags set in one don't appear in the other. " +
+  "Covers repositories, container images, and SBOMs (not packages), at org or group scope.";
+/** Short form for the read-only count and field tools, where no asset IDs change hands. */
+const INVENTORY_NOTE_SHORT = "Inventory API (Early Access; repositories, container images, SBOMs; org or group scope).";
 
 const RSQL_HINT =
   "RSQL filter, e.g. `type==repositories;visibility==public` (`;` = AND, `,` = OR), `name==*goof*` (wildcards), `labels=in=(prod,staging)`, `tags.env==production`, `key.repositories==github.com/org/repo`. Use snyk_list_inventory_fields to see the fields.";
@@ -63,8 +63,8 @@ const InventoryAssetIdSchema = z.string().superRefine((id, ctx) => {
 const AssetTypeSchema = z.enum(inv.INVENTORY_ASSET_TYPES);
 const PageLimitSchema = z.number().int().min(10).max(100).optional().describe("Results per page, 10-100 (API default 10)");
 const PageCursorFields = {
-  starting_after: z.string().optional().describe("Cursor: next_starting_after from a previous response"),
-  ending_before: z.string().optional().describe("Cursor: prev_ending_before from a previous response"),
+  starting_after: z.string().optional().describe("From next_starting_after"),
+  ending_before: z.string().optional().describe("From prev_ending_before"),
 };
 
 /** One line per asset: type, name, ID, then class/labels/tags when present. */
@@ -112,7 +112,7 @@ const ListInventoryAssetsArgsSchema = z.object({
 
 export const listInventoryAssets = defineTool({
   name: "snyk_list_inventory_assets",
-  description: `List or filter assets in an org's or group's inventory, with the total count. ${INVENTORY_NOTE} Use this to get Inventory asset IDs for snyk_update_inventory_assets, to filter with RSQL (any combination of fields), or to list an org's assets. For package assets, or IDs for the other Asset tools, use snyk_search_assets instead. Read-only.`,
+  description: `List or filter an org's or group's Inventory assets with RSQL, one line each, plus the total count; count_only returns just the number. ${INVENTORY_NOTE} Gives the asset IDs snyk_update_inventory_assets takes. Read-only.`,
   schema: ListInventoryAssetsArgsSchema,
   annotations: READ_ONLY,
   handler: async (parsed, config) => {
@@ -136,7 +136,12 @@ export const listInventoryAssets = defineTool({
     const pagination = pageCursors(data.links);
     const header = `${assets.length} of ${total ?? "?"} asset(s) in ${scopeLabel}${filterNote}:`;
     const body = assets.length ? assets.map(describeAsset).join("\n") : "No assets.";
-    const full = { data: assets, total: total ?? null, pagination };
+    // Full attributes only when the caller picked them with `fields`; otherwise the lines above
+    // already say everything but the IDs' types, and the raw records were ~1.4KB each (live).
+    const rows = parsed.fields
+      ? assets
+      : assets.map((x) => ({ id: x.id, type: x.type, name: x.attributes?.name ?? null, class: x.attributes?.class?.display_name ?? null, labels: x.attributes?.labels ?? [], tags: x.attributes?.tags ?? {} }));
+    const full = { data: rows, total: total ?? null, pagination, ...(parsed.fields ? {} : { note: "Pass fields to get other attributes, e.g. { \"repositories\": [\"name\", \"url\", \"visibility\"] }" }) };
     return {
       content: [{ type: "text", text: `${header}\n\n${body}${nextHint(pagination.next_starting_after)}\n\nFull data:\n${JSON.stringify(full, null, 2)}` }],
       isError: false,
@@ -158,7 +163,7 @@ const GetInventoryAssetCountsArgsSchema = z.object({
 
 export const getInventoryAssetCounts = defineTool({
   name: "snyk_get_inventory_asset_counts",
-  description: `Count assets in an org's or group's inventory, grouped by one field — e.g. public vs private repos, assets per class, or per org. Optionally filtered first. ${INVENTORY_NOTE} Read-only.`,
+  description: `Count assets in an org's or group's inventory, grouped by one field — e.g. public vs private repos, assets per class, or per org. Optionally filtered first. ${INVENTORY_NOTE_SHORT} Read-only.`,
   schema: GetInventoryAssetCountsArgsSchema,
   annotations: READ_ONLY,
   handler: async (parsed, config) => {
@@ -228,7 +233,7 @@ const ListInventoryFieldsArgsSchema = z.object({
 
 export const listInventoryFields = defineTool({
   name: "snyk_list_inventory_fields",
-  description: `List the fields you can filter Inventory assets by (for snyk_list_inventory_assets and snyk_get_inventory_asset_counts) and the fields counts can be grouped by. With field set, list suggested values for that filter field instead (e.g. field=visibility → public, private). ${INVENTORY_NOTE} Read-only.`,
+  description: `List the fields you can filter Inventory assets by (for snyk_list_inventory_assets and snyk_get_inventory_asset_counts) and the fields counts can be grouped by. With field set, list suggested values for that filter field instead (e.g. field=visibility → public, private). ${INVENTORY_NOTE_SHORT} Read-only.`,
   schema: ListInventoryFieldsArgsSchema,
   annotations: READ_ONLY,
   handler: async (parsed, config) => {
@@ -343,7 +348,7 @@ const MAX_PLAN_LINES = 25;
 
 export const updateInventoryAssets = defineTool({
   name: "snyk_update_inventory_assets",
-  description: `Set class and/or add or remove labels and tags on many Inventory assets at once: one request per 100 assets, and each request is all-or-nothing (the API rolls back the whole batch on failure). Only adds and removes what you list — other labels and tags are kept. ${INVENTORY_NOTE} Takes Inventory asset IDs from snyk_list_inventory_assets; for Asset API IDs or package assets use snyk_update_assets instead. The dry run checks every ID exists first. Use dry_run=true first, then dry_run=false with approval_token to apply.`,
+  description: `Set class and/or add or remove labels and tags on up to 1,000 Inventory assets (IDs from snyk_list_inventory_assets): one request per 100 assets, each all-or-nothing. Other labels and tags are kept. ${INVENTORY_NOTE} The dry run checks every ID. Use dry_run=true first, then dry_run=false with approval_token to apply.`,
   schema: UpdateInventoryAssetsArgsSchema,
   annotations: DESTRUCTIVE,
   handler: async (parsed, config) => {

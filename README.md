@@ -1,6 +1,6 @@
 # Snyk Admin MCP Server
 
-An MCP server for Snyk group admins: copy org settings, clone integrations, create orgs, tag and move projects, label assets, manage collections, and search audit logs. Every change goes through a dry run first.
+An MCP server for Snyk group admins: copy org settings, clone integrations, create orgs, tag, classify, and move projects, label assets, manage collections, see who has access, and search audit logs. Every change goes through a dry run first.
 
 ## Setup
 
@@ -45,19 +45,21 @@ Leave out `env` if you use `.env`. Some clients use a different shape; VS Code, 
 
 ## Tools
 
-**Orgs, projects, audit logs**
+**Orgs, projects, members, audit logs**
 
 | Tool | What it does |
 |------|--------------|
 | `snyk_list_orgs` | List orgs; filter by group, name, slug, personal. |
 | `snyk_list_integrations` | List an org's integrations. |
-| `snyk_list_projects` | List an org's projects. |
+| `snyk_list_projects` | List an org's projects, 100 per page; filter by name or prefix, tags, origin, type, branch, or attributes; or just count them. |
+| `snyk_list_members` | List an org's or group's members and roles; filter by email, username, or role. |
 | `snyk_search_audit_logs` | Search org or group audit logs by time, user, project, event. |
 | `snyk_create_organization` ✎ | Create an org, optionally copying settings from a template org. |
 | `snyk_copy_org_settings` ✎ | Copy V1, SAST, Open Source language, and Secrets settings to another org. |
 | `snyk_clone_integration` ✎ | Clone an integration, with credentials, to another org (not CLI). |
 | `snyk_add_project_tags` ✎ / `snyk_remove_project_tags` ✎ | Add or remove tags on many projects. |
 | `snyk_move_projects` ✎ | Move projects to another org. |
+| `snyk_update_projects` ✎ | Set business criticality, environment, lifecycle, test frequency, or owner on many projects. |
 
 **Assets: Asset API** (group scope; repositories, images, packages)
 
@@ -66,7 +68,7 @@ Leave out `env` if you use `.env`. Some clients use a different shape; VS Code, 
 | `snyk_search_assets` | Search assets with attribute filters. |
 | `snyk_get_asset` | Get one asset. |
 | `snyk_list_asset_projects` / `snyk_list_related_assets` | An asset's projects or related assets. |
-| `snyk_update_assets` ✎ | Set class, add or remove labels and tags (one request per asset). |
+| `snyk_update_assets` ✎ | Set class, add or remove labels and tags (one request per asset; the dry run checks each ID and type). |
 
 **Assets: Inventory API** (Early Access; org or group scope; repositories, images, SBOMs)
 
@@ -104,11 +106,15 @@ To help with that, every tool carries MCP annotations: read-only for `list`/`get
 - Bulk changes aren't atomic: if one item fails, earlier items stay changed. Results list each item or batch.
 - Copy, move, and clone refuse the same org as source and target.
 - Group-scoped tools take a `group_id`; `snyk_list_orgs` shows each org's.
+- Page sizes for orgs, projects, members, and collections are 10–100 in steps of 10 (Snyk's rule).
 
 **Orgs and projects**
 - `snyk_copy_org_settings` applies its four parts separately and reports each one. For V1 settings it copies only the fields the API lets you edit (e.g. `requestAccess`). If the source org's Secrets settings can't be read (usually because it has no Snyk Secrets), that part is skipped.
 - `snyk_move_projects` needs group admin. Moving across groups needs a personal API key, not a service account key.
 - Project tags (`snyk_*_project_tags`) are not asset labels.
+- `snyk_update_projects` replaces each attribute list you pass (`[]` clears it) and keeps the ones you leave out. It doesn't change tags; use the tag tools. Owners are user IDs from `snyk_list_members`.
+- The tag, move, and update dry runs check every project ID is in the org first, and stop if one isn't.
+- `snyk_list_members` with `group_id` lists group-level memberships (such as Group Admin), not each org's members.
 - Audit log search leaves out `api.access` events unless you ask for them in `events`.
 
 **Assets**

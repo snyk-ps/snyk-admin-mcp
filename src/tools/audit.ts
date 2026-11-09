@@ -20,7 +20,7 @@ const SearchAuditLogsArgsSchema = z.object({
 
 export const searchAuditLogs = defineTool({
   name: "snyk_search_audit_logs",
-  description: "Search audit logs for an org or group (REST API, GA/stable). Read-only. Provide exactly one of org_id or group_id. Filter by time range (from/to, RFC3339), user_id, project_id, and event type (events or exclude_events, not both). Note: api.access events are omitted unless explicitly included via events. Supports cursor pagination.",
+  description: "Search an org's or group's audit logs (exactly one of org_id, group_id) by time range (RFC3339 from/to), user_id, project_id, and event types (events or exclude_events, not both). api.access events are left out unless listed in events. Paged with cursor. Read-only.",
   schema: SearchAuditLogsArgsSchema,
   annotations: READ_ONLY,
   handler: async (parsed, config) => {

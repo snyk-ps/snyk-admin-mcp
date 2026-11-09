@@ -7,11 +7,13 @@
  * dry-run/approve/apply flow, so the approval-token binding lives in one place rather than
  * being reimplemented per tool.
  */
+import { z } from "zod";
 import type { SnykApiConfig } from "../snyk/types.js";
 import type { ToolResult } from "../mutation.js";
 import { type Tool, toInputSchema } from "./types.js";
 import { cloneIntegration, copyOrgSettings, createOrganization, listIntegrations, listOrgs, listProjects } from "./orgs.js";
-import { addProjectTags, moveProjects, removeProjectTags } from "./projects.js";
+import { addProjectTags, moveProjects, removeProjectTags, updateProjects } from "./projects.js";
+import { listMembers } from "./members.js";
 import { searchAuditLogs } from "./audit.js";
 import { getAsset, listAssetProjects, listRelatedAssets, searchAssets, updateAssets } from "./assets.js";
 import { getInventoryAssetCounts, listInventoryAssets, listInventoryFields, updateInventoryAssets } from "./inventory.js";
@@ -23,10 +25,12 @@ export const TOOLS: readonly Tool[] = [
   addProjectTags,
   removeProjectTags,
   moveProjects,
+  updateProjects,
   createOrganization,
   listOrgs,
   listIntegrations,
   listProjects,
+  listMembers,
   searchAuditLogs,
   searchAssets,
   getAsset,
@@ -57,6 +61,21 @@ export function listTools() {
 }
 
 /**
+ * Replace "Invalid key in record" / "Invalid element" wrapper issues with the issues they
+ * wrap, so the schema's own message (e.g. "Tag keys must be 1-30 characters…") is what the
+ * caller reads, at the full path.
+ */
+function unwrapIssues(issues: readonly z.core.$ZodIssue[], prefix: PropertyKey[] = []): z.core.$ZodIssue[] {
+  return issues.flatMap((issue) => {
+    const path = [...prefix, ...issue.path];
+    if ((issue.code === "invalid_key" || issue.code === "invalid_element") && issue.issues.length) {
+      return unwrapIssues(issue.issues, path);
+    }
+    return [{ ...issue, path }];
+  });
+}
+
+/**
  * Run one `tools/call`. This is the single error boundary for every tool: any thrown error
  * (invalid arguments, a failed API call, a missing token) becomes a normal `isError: true`
  * result instead of an unhandled rejection. `getConfig` is called inside it for that reason.
@@ -68,6 +87,11 @@ export async function handleToolCall(name: string, args: unknown, getConfig: () 
     if (!tool) return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
     return await tool.run(args, config);
   } catch (err) {
+    // Invalid arguments: one readable line per problem ("✖ message → at field") instead of the
+    // raw JSON array of Zod issues, which is what err.message holds.
+    if (err instanceof z.ZodError) {
+      return { content: [{ type: "text", text: `Invalid arguments for ${name}:\n${z.prettifyError(new z.ZodError(unwrapIssues(err.issues)))}` }], isError: true };
+    }
     return {
       content: [{ type: "text", text: `Error: ${err instanceof Error ? err.message : String(err)}` }],
       isError: true,
