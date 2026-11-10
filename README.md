@@ -7,6 +7,7 @@ An MCP server for Snyk group admins. Every change goes through a dry run first.
 - **Orgs:** list orgs and integrations, create orgs, copy settings (V1, Snyk Code, Open Source languages, Secrets), and clone integrations between orgs.
 - **Projects:** find projects by name, tag, origin, or attributes; add or remove tags; set criticality, environment, lifecycle, test frequency, and owner; move projects between orgs.
 - **People and activity:** list org and group members and their roles, and search audit logs.
+- **Ignores:** list an org's Snyk Code ignore policies and copy them to another org.
 - **Assets:** search, classify, label, and tag repositories, images, and packages, in both the Asset API and the Inventory API.
 - **Collections:** list, create, and update project collections.
 

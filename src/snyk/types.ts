@@ -37,6 +37,13 @@ export const SECRETS_SETTINGS_API_VERSION = "2024-10-15~beta";
  */
 export const INVENTORY_API_VERSION = "2024-10-15";
 
+/**
+ * Version for the org-level Policies endpoints (Snyk Code consistent ignores). They became GA
+ * in 2026-03-25; before that they were beta-only, so the default REST_API_VERSION doesn't
+ * serve them.
+ */
+export const POLICIES_API_VERSION = "2026-03-25";
+
 /** Sanitize ID/path segment before use in API URLs to prevent SSRF. Returns validated string. */
 export function sanitizePathSegment(value: string, label: string): string {
   if (!value || typeof value !== "string") throw new Error(`Invalid ${label}`);

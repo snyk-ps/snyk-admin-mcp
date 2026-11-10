@@ -92,6 +92,19 @@ Early Access. Org or group scope; repositories, images, SBOMs.
 
 - `snyk_list_members` with `group_id` uses the [Groups](https://docs.snyk.io/developer-tools/snyk-api/reference/groups) memberships endpoint. It lists group-level memberships (such as Group Admin), not each org's members.
 
+## [Policies](https://docs.snyk.io/developer-tools/snyk-api/reference/policies)
+
+Snyk Code consistent ignores. Org scope; the org needs "Ignores across the repository for Snyk Code" turned on.
+
+| Tool | What it does |
+|------|--------------|
+| `snyk_copy_ignore_policies` ✎ | Copy an org's ignore policies to another org, all in effect or chosen ones. |
+| `snyk_list_ignore_policies` | List an org's ignore policies: type, expiry, review state, the finding each ignores, who and why. |
+
+- Each policy ignores one Snyk Code finding across a repository, matched by the finding's repository-level ID, so a copy only hides that finding where the target org scans the same repository.
+- The copy skips rejected and expired policies, pending ones unless `include_pending`, and findings the target org already has a policy for. It's labelled destructive because ignores hide findings.
+- Copied policies are created as the API token's user; the target org's ignore approval settings may put them in review. Retest the target's Snyk Code projects for them to show.
+
 ## [Projects (v1)](https://docs.snyk.io/developer-tools/snyk-api/reference/projects-v1)
 
 | Tool | What it does |

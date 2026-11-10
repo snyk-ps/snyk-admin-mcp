@@ -1,4 +1,4 @@
-import { ASSET_API_VERSION, assertAllowedUrl, getBaseUrl, REST_API_VERSION, SECRETS_SETTINGS_API_VERSION, sanitizePathSegment, type SnykApiConfig } from "./types.js";
+import { ASSET_API_VERSION, assertAllowedUrl, getBaseUrl, POLICIES_API_VERSION, REST_API_VERSION, SECRETS_SETTINGS_API_VERSION, sanitizePathSegment, type SnykApiConfig } from "./types.js";
 import { fetchWithRetry, restRateLimiter } from "./rateLimit.js";
 
 /**
@@ -960,4 +960,107 @@ export async function listAllCollectionProjectIds(config: SnykApiConfig, orgId: 
     cursor = next;
   }
   throw new Error(`Collection has more than ${MAX_COLLECTION_MEMBER_PAGES * 100} projects; stopped paging.`);
+}
+
+// ---------------------------------------------------------------------------
+// Org-level Policies (GA since 2026-03-25): Snyk Code consistent ignores.
+// Each policy ignores one Snyk Code finding across a repository, matched by the finding's
+// repository-level ID (`snyk/asset/finding/v1`). Only usable in orgs with "Ignores across the
+// repository for Snyk Code" (consistent ignores) turned on.
+// Docs: https://docs.snyk.io/developer-tools/snyk-api/reference/policies
+// ---------------------------------------------------------------------------
+
+export const IGNORE_TYPES = ["wont-fix", "temporary-ignore", "not-vulnerable"] as const;
+export const POLICY_REVIEW_STATES = ["pending", "approved", "rejected", "not-required"] as const;
+
+/** What a policy does and what it matches. These are the fields a create request takes. */
+export type IgnorePolicyContent = {
+  name: string;
+  action_type: "ignore";
+  action: { data: { ignore_type: (typeof IGNORE_TYPES)[number]; expires?: string; reason?: string } };
+  conditions_group: { logical_operator: "and"; conditions: { field: string; operator: string; value: string }[] };
+};
+
+export type IgnorePolicy = {
+  id: string;
+  type?: string;
+  attributes: IgnorePolicyContent & {
+    review?: (typeof POLICY_REVIEW_STATES)[number];
+    created_at?: string;
+    updated_at?: string;
+    created_by?: { name?: string; email?: string; id?: string };
+  } & Record<string, unknown>;
+};
+export type ListIgnorePoliciesResponse = { data: IgnorePolicy[]; links?: PageLinks };
+
+export type ListIgnorePoliciesOptions = {
+  search?: string;
+  review?: string[];
+  expires_before?: string;
+  expires_after?: string;
+  expires_never?: boolean;
+  order_by?: "created" | "expires" | "ignore-type" | "requested-by";
+  order_direction?: "asc" | "desc";
+  limit?: number;
+  starting_after?: string;
+};
+
+/** One page of an org's ignore policies. GET /orgs/{org_id}/policies. `review` is comma-separated (`explode: false`). */
+export async function listIgnorePolicies(config: SnykApiConfig, orgId: string, opts: ListIgnorePoliciesOptions = {}): Promise<ListIgnorePoliciesResponse> {
+  const safeOrgId = sanitizePathSegment(orgId, "org_id");
+  const qs = buildQuery({
+    search: opts.search,
+    review: opts.review?.length ? opts.review.join(",") : undefined,
+    expires_before: opts.expires_before,
+    expires_after: opts.expires_after,
+    expires_never: opts.expires_never === undefined ? undefined : String(opts.expires_never),
+    order_by: opts.order_by,
+    order_direction: opts.order_direction,
+    limit: opts.limit,
+    starting_after: opts.starting_after,
+  });
+  const res = await restFetch(config, `/orgs/${safeOrgId}/policies${qs}`, { version: POLICIES_API_VERSION });
+  if (!res.ok) throw new Error(`REST listIgnorePolicies failed: ${res.status} ${await res.text()}`);
+  return res.json() as Promise<ListIgnorePoliciesResponse>;
+}
+
+/** Safety cap when reading every policy in an org: 50 pages of 100. */
+const MAX_POLICY_PAGES = 50;
+
+/** Every ignore policy in an org, following cursors at 100 per page. Throws if there are more than the cap. */
+export async function listAllIgnorePolicies(config: SnykApiConfig, orgId: string): Promise<IgnorePolicy[]> {
+  const out: IgnorePolicy[] = [];
+  let cursor: string | undefined;
+  for (let page = 0; page < MAX_POLICY_PAGES; page++) {
+    const res = await listIgnorePolicies(config, orgId, { limit: 100, starting_after: cursor });
+    out.push(...(res.data ?? []));
+    const next = cursorFromLink(res.links?.next, "starting_after");
+    if (!next) return out;
+    cursor = next;
+  }
+  throw new Error(`Org ${orgId} has more than ${MAX_POLICY_PAGES * 100} ignore policies; this tool stops there rather than work from a partial list.`);
+}
+
+/** Create one ignore policy. POST /orgs/{org_id}/policies (201). */
+export async function createIgnorePolicy(config: SnykApiConfig, orgId: string, content: IgnorePolicyContent): Promise<IgnorePolicy> {
+  const safeOrgId = sanitizePathSegment(orgId, "org_id");
+  const res = await restFetch(config, `/orgs/${safeOrgId}/policies`, {
+    method: "POST",
+    body: JSON.stringify({
+      data: {
+        type: "policy",
+        attributes: {
+          name: content.name,
+          action_type: content.action_type,
+          action: content.action,
+          conditions_group: content.conditions_group,
+          source: "api",
+        },
+      },
+    }),
+    version: POLICIES_API_VERSION,
+  });
+  if (!res.ok) throw new Error(`REST createIgnorePolicy failed: ${res.status} ${await res.text()}`);
+  const body = (await res.json()) as { data: IgnorePolicy };
+  return body.data;
 }
