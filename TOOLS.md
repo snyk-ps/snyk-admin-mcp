@@ -33,8 +33,9 @@ Early Access. Group scope; repositories, images, packages.
 
 | Tool | What it does |
 |------|--------------|
-| `snyk_search_audit_logs` | Search org or group audit logs by time, user, project, event. |
+| `snyk_search_audit_logs` | Search org or group audit logs by time, user, project, event; one line per entry. |
 
+- 20 entries per page by default (up to 100). Each entry's details, such as a setting's before and after values, are left out unless `include_content` is true.
 - Leaves out `api.access` events unless you ask for them in `events`.
 
 ## [Collection](https://docs.snyk.io/developer-tools/snyk-api/reference/collection)
@@ -51,7 +52,7 @@ Org scope.
 - There is no group-level endpoint; covering a group means one call per org. A collection's projects must be in its org.
 - Snyk generates one collection per imported repo (`is_generated`); filter with `is_generated: false` to see only people-made ones.
 - The API silently ignores unknown project IDs and projects from other orgs, so the tools re-read the collection after a change and report `not_added` / `not_removed`.
-- Collection project lists have IDs and issue counts but no names; use `snyk_list_projects` for names.
+- Collection project lists have IDs and issue counts but no names; use `snyk_list_projects` for names. A collection ID that doesn't exist is an error, not an empty list.
 
 ## [Integrations (v1)](https://docs.snyk.io/developer-tools/snyk-api/reference/integrations-v1)
 
@@ -59,6 +60,8 @@ Org scope.
 |------|--------------|
 | `snyk_clone_integration` ✎ | Clone an integration, with credentials, to another org (not CLI). |
 | `snyk_list_integrations` | List an org's integrations. |
+
+- If the target org already has an integration of that type, the clone writes into it, replacing its settings and credentials, rather than adding a second one. The dry run warns when that will happen.
 
 ## [Inventory Assets](https://docs.snyk.io/developer-tools/snyk-api/reference/inventory-assets)
 

@@ -13,14 +13,15 @@ const SearchAuditLogsArgsSchema = z.object({
   exclude_events: z.array(z.string()).optional().describe("Exclude these event types. Cannot be combined with events."),
   user_id: z.string().optional().describe("Filter to a specific user ID"),
   project_id: z.string().optional().describe("Filter to a specific project ID"),
-  size: z.number().int().min(1).max(100).optional().describe("Results per page (1-100, default 100)"),
+  size: z.number().int().min(1).max(100).optional().describe("Results per page (1-100, default 20 here)"),
+  include_content: z.boolean().optional().describe("Include each entry's details (e.g. a setting's before/after values). Default false: entries list which details exist instead"),
   sort_order: z.enum(["ASC", "DESC"]).optional().describe("Sort order, default DESC (newest first)"),
   cursor: z.string().optional().describe("Pagination cursor: next_cursor from a previous response. Resend the same filters with it."),
 });
 
 export const searchAuditLogs = defineTool({
   name: "snyk_search_audit_logs",
-  description: "Search an org's or group's audit logs (exactly one of org_id, group_id) by time range (RFC3339 from/to), user_id, project_id, and event types (events or exclude_events, not both). api.access events are left out unless listed in events. Paged with cursor. Read-only.",
+  description: "Search an org's or group's audit logs (exactly one of org_id, group_id) by time range (RFC3339 from/to), user_id, project_id, and event types (events or exclude_events, not both), one line per entry with event, user, org, and project. 20 per page by default. Each entry's details (e.g. a setting's before/after values) are left out unless include_content is true. api.access events are left out unless listed in events. Read-only.",
   schema: SearchAuditLogsArgsSchema,
   annotations: READ_ONLY,
   handler: async (parsed, config) => {
@@ -39,13 +40,13 @@ export const searchAuditLogs = defineTool({
       exclude_events: parsed.exclude_events,
       user_id: parsed.user_id,
       project_id: parsed.project_id,
-      size: parsed.size,
+      size: parsed.size ?? 20,
       sort_order: parsed.sort_order,
       cursor: parsed.cursor,
     });
     const items = data.data?.items ?? [];
     const summary = items.length
-      ? items.map((i) => `${i.created} — ${i.event}${i.project_id ? ` (project ${i.project_id})` : ""}`).join("\n")
+      ? items.map((i) => `${i.created} — ${i.event}${i.user_id ? `; user ${i.user_id}` : ""}${i.org_id && scope === "groups" ? `; org ${i.org_id}` : ""}${i.project_id ? `; project ${i.project_id}` : ""}`).join("\n")
       : "No audit log entries in this window.";
     const nextCursor = rest.cursorFromLink(data.links?.next, "cursor");
     const nextHint = nextCursor
@@ -54,9 +55,17 @@ export const searchAuditLogs = defineTool({
     // `links` is replaced by the bare cursor so the raw next-link path can't be mistaken
     // for the cursor value (the API rejects that with 400 "invalid cursor").
     const { links: _links, ...withoutLinks } = data;
-    const full = { ...withoutLinks, pagination: { next_cursor: nextCursor } };
+    // Details are unbounded per entry (a settings edit carries whole before/after objects), and
+    // with up to 100 entries per page that adds up, so by default each entry says which details
+    // it has instead of carrying them.
+    const entries = parsed.include_content
+      ? items
+      : items.map(({ content, ...rest }) => ({ ...rest, ...(content && Object.keys(content).length ? { content_keys: Object.keys(content) } : {}) }));
+    const hidden = !parsed.include_content && items.some((i) => i.content && Object.keys(i.content).length);
+    const full = { ...withoutLinks, data: { ...withoutLinks.data, items: entries }, pagination: { next_cursor: nextCursor } };
+    const contentHint = hidden ? "\n\nEntry details (content_keys) are left out; pass include_content: true to see them." : "";
     return {
-      content: [{ type: "text", text: `${summary}${nextHint}\n\nFull data:\n${JSON.stringify(full, null, 2)}` }],
+      content: [{ type: "text", text: `${summary}${nextHint}${contentHint}\n\nFull data:\n${JSON.stringify(full, null, 2)}` }],
       isError: false,
     };
   },

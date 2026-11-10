@@ -370,7 +370,7 @@ export const copyOrgSettings = defineTool({
 
 export const cloneIntegration = defineTool({
   name: "snyk_clone_integration",
-  description: "Clone an integration (with settings and credentials) from one organization to another. Uses Snyk V1 API. CLI integrations are not supported (rejected). Use dry_run=true first, then dry_run=false with approval_token to execute.",
+  description: "Clone an integration (with settings and credentials) from one organization to another. Uses Snyk V1 API. If the target org already has an integration of that type, Snyk writes into it, replacing its settings and credentials; the dry run says when that will happen. CLI integrations are not supported (rejected). Use dry_run=true first, then dry_run=false with approval_token to execute.",
   schema: CloneIntegrationArgsSchema,
   annotations: DESTRUCTIVE,
   handler: async (parsed, config) => {
@@ -388,23 +388,33 @@ export const cloneIntegration = defineTool({
         isError: true,
       };
     }
-    type CloneIntegrationPlan = { source_org_id: string; integration_id: string; target_org_id: string };
+    type CloneIntegrationPlan = { source_org_id: string; integration_id: string; target_org_id: string; replaces_integration_id: string | null };
     return await runMutationTool<CloneIntegrationPlan>({
       action: "clone_integration",
       toolName: "snyk_clone_integration",
       dryRun: parsed.dry_run,
       approvalToken: parsed.approval_token,
       bindingArgs: { source_org_id: parsed.source_org_id, integration_id: parsed.integration_id, target_org_id: parsed.target_org_id },
-      buildPlanData: () => ({
-        source_org_id: parsed.source_org_id,
-        integration_id: parsed.integration_id,
-        target_org_id: parsed.target_org_id,
-      }),
+      // Cloning into an org that already has that integration type doesn't add a second one or
+      // fail: Snyk returns the existing integration's ID and writes the source's settings and
+      // credentials into it (verified live, 2026-11-10). So the dry run looks for one first.
+      buildPlanData: async () => {
+        const targetIntegrations = integrationType ? await v1.listIntegrations(config, sanitizePathSegment(parsed.target_org_id, "target_org_id")) : {};
+        return {
+          source_org_id: parsed.source_org_id,
+          integration_id: parsed.integration_id,
+          target_org_id: parsed.target_org_id,
+          replaces_integration_id: integrationType ? targetIntegrations[integrationType] ?? null : null,
+        };
+      },
       describeDryRun: async (data) => {
         const sourceLabel = await formatOrgId(config, data.source_org_id);
         const targetLabel = await formatOrgId(config, data.target_org_id);
         const integrationLabel = await formatIntegrationId(config, data.source_org_id, data.integration_id);
-        return `Dry run – clone integration ${integrationLabel} from ${sourceLabel} to ${targetLabel}.\n\nPlan:\n${JSON.stringify(data, null, 2)}`;
+        const replaces = data.replaces_integration_id
+          ? `\n\nWarning: ${targetLabel} already has a ${integrationType} integration (${data.replaces_integration_id}). Snyk will write this integration's settings and credentials into that one, replacing what it has now; it doesn't add a second ${integrationType} integration.`
+          : `\n\n${targetLabel} has no ${integrationType ?? "such"} integration yet, so this adds one.`;
+        return `Dry run – clone integration ${integrationLabel} from ${sourceLabel} to ${targetLabel}.${replaces}\n\nPlan:\n${JSON.stringify(data, null, 2)}`;
       },
       apply: async (data) => {
         const result = await v1.cloneIntegration(

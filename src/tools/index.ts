@@ -9,7 +9,7 @@
  */
 import { z } from "zod";
 import type { SnykApiConfig } from "../snyk/types.js";
-import type { ToolResult } from "../mutation.js";
+import { type ToolCallContext, type ToolResult, withToolCallContext } from "../mutation.js";
 import { type Tool, toInputSchema } from "./types.js";
 import { cloneIntegration, copyOrgSettings, createOrganization, listIntegrations, listOrgs, listProjects } from "./orgs.js";
 import { addProjectTags, moveProjects, removeProjectTags, updateProjects } from "./projects.js";
@@ -83,12 +83,12 @@ function unwrapIssues(issues: readonly z.core.$ZodIssue[], prefix: PropertyKey[]
  * (invalid arguments, a failed API call, a missing token) becomes a normal `isError: true`
  * result instead of an unhandled rejection. `getConfig` is called inside it for that reason.
  */
-export async function handleToolCall(name: string, args: unknown, getConfig: () => SnykApiConfig): Promise<ToolResult> {
+export async function handleToolCall(name: string, args: unknown, getConfig: () => SnykApiConfig, ctx: ToolCallContext = {}): Promise<ToolResult> {
   try {
     const config = getConfig();
     const tool = toolsByName.get(name);
     if (!tool) return { content: [{ type: "text", text: `Unknown tool: ${name}` }], isError: true };
-    return await tool.run(args, config);
+    return await withToolCallContext(ctx, () => tool.run(args, config));
   } catch (err) {
     // Invalid arguments: one readable line per problem ("✖ message → at field") instead of the
     // raw JSON array of Zod issues, which is what err.message holds.

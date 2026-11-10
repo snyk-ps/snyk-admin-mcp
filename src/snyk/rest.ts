@@ -330,6 +330,7 @@ export async function listMemberships(
 export type AuditLogEntry = {
   created: string;
   event: string;
+  user_id?: string;
   content?: Record<string, unknown>;
   group_id?: string;
   org_id?: string;
@@ -818,6 +819,17 @@ export async function getCollection(config: SnykApiConfig, orgId: string, collec
   const safeOrgId = sanitizePathSegment(orgId, "org_id");
   const safeCollectionId = sanitizePathSegment(collectionId, "collection_id");
   const res = await restFetch(config, `/orgs/${safeOrgId}/collections/${safeCollectionId}`);
+  if (!res.ok) throw new Error(`REST getCollection failed: ${res.status} ${await res.text()}`);
+  const body = (await res.json()) as { data: CollectionResource };
+  return body.data;
+}
+
+/** A collection, or null when the org has no collection with this ID (404). */
+export async function findCollection(config: SnykApiConfig, orgId: string, collectionId: string): Promise<CollectionResource | null> {
+  const safeOrgId = sanitizePathSegment(orgId, "org_id");
+  const safeCollectionId = sanitizePathSegment(collectionId, "collection_id");
+  const res = await restFetch(config, `/orgs/${safeOrgId}/collections/${safeCollectionId}`);
+  if (res.status === 404) return null;
   if (!res.ok) throw new Error(`REST getCollection failed: ${res.status} ${await res.text()}`);
   const body = (await res.json()) as { data: CollectionResource };
   return body.data;

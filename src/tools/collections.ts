@@ -199,16 +199,26 @@ export const listCollectionProjects = defineTool({
   schema: ListCollectionProjectsArgsSchema,
   annotations: READ_ONLY,
   handler: async (a, config) => {
-    const data = await rest.listCollectionProjects(config, a.org_id, a.collection_id, {
-      limit: a.limit,
-      starting_after: a.starting_after,
-      ending_before: a.ending_before,
-      sort: a.sort,
-      direction: a.direction,
-      target_id: a.target_ids,
-      show: a.show,
-      integration: a.integrations,
-    });
+    // The projects endpoint answers 200 [] for a collection ID that doesn't exist (verified live,
+    // even with an org ID passed as the collection ID), which reads as "empty collection". The
+    // collection itself 404s, so look it up alongside: that catches a wrong ID and gives the name.
+    const [collection, data] = await Promise.all([
+      rest.findCollection(config, a.org_id, a.collection_id),
+      rest.listCollectionProjects(config, a.org_id, a.collection_id, {
+        limit: a.limit,
+        starting_after: a.starting_after,
+        ending_before: a.ending_before,
+        sort: a.sort,
+        direction: a.direction,
+        target_id: a.target_ids,
+        show: a.show,
+        integration: a.integrations,
+      }),
+    ]);
+    if (!collection) {
+      const where = await formatOrgId(config, a.org_id);
+      return { content: [{ type: "text", text: `No collection ${a.collection_id} in ${where}. Use snyk_list_collections to find this org's collection IDs.` }], isError: true };
+    }
     const projects = data.data ?? [];
     const lines = projects.map((p) => {
       const m = p.meta;
@@ -224,7 +234,7 @@ export const listCollectionProjects = defineTool({
       ? `\n\nMore results: pass starting_after="${pagination.next_starting_after}" to get the next page.`
       : "";
     return {
-      content: [{ type: "text", text: `Projects in collection ${a.collection_id}:\n\n${body}${nextHint}\n\nFull data:\n${JSON.stringify(full, null, 2)}` }],
+      content: [{ type: "text", text: `Projects in collection ${collection.attributes.name} (${a.collection_id}):\n\n${body}${nextHint}\n\nFull data:\n${JSON.stringify(full, null, 2)}` }],
       isError: false,
     };
   },

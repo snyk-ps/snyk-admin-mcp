@@ -28,6 +28,7 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
 import type { SnykApiConfig, SnykRegion } from "./snyk/types.js";
 import { handleToolCall, listTools } from "./tools/index.js";
+import type { ConfirmResult } from "./mutation.js";
 
 const SNYK_TOKEN = process.env.SNYK_API_TOKEN ?? process.env.SNYK_TOKEN ?? "";
 const SNYK_REGION = (process.env.SNYK_API_REGION ?? "us-01") as SnykRegion;
@@ -52,12 +53,45 @@ const server = new Server(
 
 server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: listTools() }));
 
+/**
+ * SNYK_ADMIN_CONFIRM=off turns the confirmation prompt off (for a client that advertises
+ * elicitation but can't actually show it). Anything else, or unset, means "ask when the
+ * client supports it".
+ */
+const CONFIRM_OFF = (process.env.SNYK_ADMIN_CONFIRM ?? "").trim().toLowerCase() === "off";
+
+/** How long to wait for the person to answer; the approval token itself is valid for 10 minutes. */
+const CONFIRM_TIMEOUT_MS = 5 * 60 * 1000;
+
+/**
+ * Before an apply, ask the person through the MCP client (elicitation, a form with one
+ * checkbox) whether to go ahead. Only a submitted form with the box ticked counts as yes.
+ * Clients that don't support elicitation get "unavailable", so the token flow decides alone.
+ */
+async function confirmApply({ toolName, summary }: { toolName: string; summary: string }): Promise<ConfirmResult> {
+  if (CONFIRM_OFF || !server.getClientCapabilities()?.elicitation?.form) return "unavailable";
+  const result = await server.elicitInput(
+    {
+      message: `Snyk Admin MCP wants to apply a change with ${toolName}:\n\n${summary}`,
+      requestedSchema: {
+        type: "object",
+        properties: {
+          confirm: { type: "boolean", title: "Apply this change", description: "Tick and submit to make this change in Snyk now. Decline to cancel it." },
+        },
+        required: ["confirm"],
+      },
+    },
+    { timeout: CONFIRM_TIMEOUT_MS }
+  );
+  return result.action === "accept" && result.content?.confirm === true ? "confirmed" : "declined";
+}
+
 // The MCP SDK's expected return type for tools/call is a large union that a plain
 // ToolResult value doesn't structurally satisfy when passed through directly (a TypeScript
 // quirk with how it checks large unions against a non-literal object) — rebuilding a fresh
 // literal here from `result`'s fields is what makes this typecheck.
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const result = await handleToolCall(request.params.name, request.params.arguments, getConfig);
+  const result = await handleToolCall(request.params.name, request.params.arguments, getConfig, { confirm: confirmApply });
   return { content: result.content, isError: result.isError };
 });
 

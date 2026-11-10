@@ -61,9 +61,10 @@ Tools that change Snyk (marked ✎ in [TOOLS.md](TOOLS.md)) work in two steps:
 1. Call the tool with `dry_run: true` (the default). It returns a plan and an `approval_token`.
 2. Call it again with `dry_run: false` and that token.
 
-The token only applies the exact plan that was previewed (same tool and arguments, within 10 minutes, once). It is **not** a human sign-off: the AI receives the token and can make the apply call itself. The human check is your MCP client's confirmation prompt, so **don't "always allow" the ✎ tools**.
+The token only applies the exact plan that was previewed (same tool and arguments, within 10 minutes, once). On its own it is **not** a human sign-off: the AI receives the token and can make the apply call itself. Two things put a person in the loop:
 
-To help with that, every tool is labelled read-only, additive, or destructive (MCP annotations), so clients can ask before running the ones that change things.
+- **A confirmation prompt.** If your MCP client supports elicitation, the server shows you the plan and asks you to confirm before every apply. Nothing changes unless you tick **Apply this change** and submit; declining cancels the plan. To turn the prompt off (for a client that advertises elicitation but can't show it), set `SNYK_ADMIN_CONFIRM=off` in the server's environment.
+- **Your client's tool permissions.** Every tool is labelled read-only, additive, or destructive (MCP annotations), so clients can ask before running the ones that change things. **Don't "always allow" the ✎ tools**, especially in a client without elicitation.
 
 ## License
 

@@ -1,3 +1,4 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import { createApproval, peekApproval, discardApproval } from "./approval.js";
 
 /**
@@ -12,6 +13,31 @@ export interface ToolResult {
   content: { type: "text"; text: string }[];
   isError: boolean;
 }
+
+/** What a confirmation prompt came back with. "unavailable" means no prompt could be shown (client without elicitation, or turned off), so the token alone decides, as before. */
+export type ConfirmResult = "confirmed" | "declined" | "unavailable";
+
+/**
+ * Per-call context from the transport layer (src/index.ts), carried to runMutationTool without
+ * threading it through every tool handler.
+ */
+export interface ToolCallContext {
+  /**
+   * Ask the human, through the MCP client, to confirm an apply before it runs (MCP elicitation).
+   * Throws if asking failed (e.g. the prompt timed out), and the apply is then not run.
+   */
+  confirm?: (request: { toolName: string; summary: string }) => Promise<ConfirmResult>;
+}
+
+const callContext = new AsyncLocalStorage<ToolCallContext>();
+
+/** Run one tool call with this context available to runMutationTool. */
+export function withToolCallContext<T>(ctx: ToolCallContext, fn: () => Promise<T>): Promise<T> {
+  return callContext.run(ctx, fn);
+}
+
+/** Longest plan summary put in a confirmation prompt; the full plan was in the dry run. */
+const MAX_CONFIRM_SUMMARY = 3000;
 
 /** Recursively sort object keys so JSON.stringify is stable regardless of insertion order. */
 function canonicalize(value: unknown): unknown {
@@ -39,6 +65,8 @@ interface MutationPlan<TData> {
   requestKey: string;
   /** The tool-specific payload built by buildPlanData(), handed unchanged to apply(). */
   data: TData;
+  /** The human-readable part of the dry-run text, shown again in the confirmation prompt. */
+  summary: string;
 }
 
 /**
@@ -65,9 +93,11 @@ export async function runMutationTool<TData>(opts: {
 
   if (opts.dryRun) {
     const data = await opts.buildPlanData();
-    const plan: MutationPlan<TData> = { action: opts.action, requestKey, data };
-    const approval_token = createApproval(plan);
     const description = await opts.describeDryRun(data);
+    const readable = description.split("\n\nPlan:")[0];
+    const summary = readable.length > MAX_CONFIRM_SUMMARY ? `${readable.slice(0, MAX_CONFIRM_SUMMARY)}…` : readable;
+    const plan: MutationPlan<TData> = { action: opts.action, requestKey, data, summary };
+    const approval_token = createApproval(plan);
     return {
       content: [{
         type: "text",
@@ -90,6 +120,32 @@ export async function runMutationTool<TData>(opts: {
       }],
       isError: true,
     };
+  }
+  // The human check, when the client can show one: the token proves the apply matches the
+  // previewed plan, but the AI holds it and can send it on its own. A confirmation prompt
+  // (MCP elicitation) puts the decision in front of the person instead.
+  const confirm = callContext.getStore()?.confirm;
+  if (confirm) {
+    let result: ConfirmResult;
+    try {
+      result = await confirm({ toolName: opts.toolName, summary: stored.summary });
+    } catch (err) {
+      return {
+        content: [{
+          type: "text",
+          text: `Not applied: couldn't get a confirmation from you through the MCP client (${err instanceof Error ? err.message : String(err)}). Nothing was changed, and the approval token is still valid. If your client can't show confirmation prompts, set SNYK_ADMIN_CONFIRM=off in the server's environment.`,
+        }],
+        isError: true,
+      };
+    }
+    if (result === "declined") {
+      // A declined plan can't be re-sent with the same token; a deliberate retry needs a new dry run.
+      discardApproval(token);
+      return {
+        content: [{ type: "text", text: "Not applied: the change was declined in the confirmation prompt. Nothing was changed. The approval token is no longer valid; run the dry run again if that was a mistake." }],
+        isError: true,
+      };
+    }
   }
   // Consumed before applying so a client retry cannot execute the mutation twice.
   discardApproval(token);
