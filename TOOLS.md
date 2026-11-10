@@ -84,6 +84,7 @@ Early Access. Org or group scope; repositories, images, SBOMs.
 | `snyk_copy_org_settings` ✎ | Copy V1, SAST, Open Source language, and Secrets settings to another org. |
 | `snyk_create_organization` ✎ | Create an org, optionally copying settings from a template org. |
 
+- The `snyk_copy_org_settings` dry run shows the target's Snyk Code and Snyk Secrets state before and after, and warns if the copy would turn either one off.
 - `snyk_copy_org_settings` also uses the [SastSettings](https://docs.snyk.io/developer-tools/snyk-api/reference/sastsettings), [LanguagesSettings](https://docs.snyk.io/developer-tools/snyk-api/reference/languagessettings), and [SecretsSettings](https://docs.snyk.io/developer-tools/snyk-api/reference/secretssettings) APIs. It applies the four parts separately and reports each one. For V1 settings it copies only the fields the API lets you edit (e.g. `requestAccess`). If the source org's Secrets settings can't be read (usually because it has no Snyk Secrets), that part is skipped.
 
 ## [Orgs](https://docs.snyk.io/developer-tools/snyk-api/reference/orgs)
@@ -105,7 +106,7 @@ Snyk Code consistent ignores. Org scope; the org needs "Ignores across the repos
 | `snyk_list_ignore_policies` | List an org's ignore policies: type, expiry, review state, the finding each ignores, who and why. |
 
 - Each policy ignores one Snyk Code finding across a repository, matched by the finding's repository-level ID, so a copy only hides that finding where the target org scans the same repository.
-- The copy skips rejected and expired policies, pending ones unless `include_pending`, and findings the target org already has a policy for. It's labelled destructive because ignores hide findings.
+- The copy skips rejected and expired policies, pending ones unless `include_pending`, and findings the target org already has an active or pending policy for (an expired or rejected one there doesn't count). With `include_pending`, the dry run warns that those policies may take effect in the target straight away. It's labelled destructive because ignores hide findings.
 - Copied policies are created as the API token's user; the target org's ignore approval settings may put them in review. Retest the target's Snyk Code projects for them to show.
 
 ## [Projects (v1)](https://docs.snyk.io/developer-tools/snyk-api/reference/projects-v1)

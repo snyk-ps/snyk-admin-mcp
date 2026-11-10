@@ -89,7 +89,7 @@ type Skipped = { id: string; name: string; why: string };
 type CopyPlan = {
   source_org_id: string;
   target_org_id: string;
-  create: { source_id: string; content: rest.IgnorePolicyContent }[];
+  create: { source_id: string; content: rest.IgnorePolicyContent; pending_in_source?: boolean }[];
   skipped: Skipped[];
 };
 
@@ -121,7 +121,11 @@ export const copyIgnorePolicies = defineTool({
           candidates = policyIds.map((id) => byId.get(id)!);
         }
         const now = Date.now();
-        const targetFindings = new Map(target.map((p) => [findingOf(p), p]));
+        // Only target policies that are, or may become, in effect count as covering a finding:
+        // an expired or rejected one doesn't ignore anything, so the source's policy is still needed.
+        const targetFindings = new Map(
+          target.filter((p) => p.attributes.review !== "rejected" && !isExpired(p, now)).map((p) => [findingOf(p), p])
+        );
         const create: CopyPlan["create"] = [];
         const skipped: Skipped[] = [];
         const planned = new Set<string>();
@@ -131,12 +135,15 @@ export const copyIgnorePolicies = defineTool({
           if (p.attributes.review === "rejected") skip("review rejected, so not in effect");
           else if (p.attributes.review === "pending" && !a.include_pending) skip("pending review (pass include_pending to copy it)");
           else if (isExpired(p, now)) skip(`expired ${expiresOf(p)}`);
-          else if (targetFindings.has(finding)) skip(`target org already has a policy for this finding (${targetFindings.get(finding)!.attributes.name})`);
+          else if (targetFindings.has(finding)) {
+            const existing = targetFindings.get(finding)!;
+            skip(`target org already has a policy for this finding (${existing.attributes.name}${existing.attributes.review === "pending" ? ", pending review there" : ""})`);
+          }
           else if (planned.has(finding)) skip("another policy in this copy already covers this finding");
           else {
             planned.add(finding);
             const { name, action_type, action, conditions_group } = p.attributes;
-            create.push({ source_id: p.id, content: { name, action_type, action, conditions_group } });
+            create.push({ source_id: p.id, content: { name, action_type, action, conditions_group }, pending_in_source: p.attributes.review === "pending" });
           }
         }
         return { source_org_id: a.source_org_id, target_org_id: a.target_org_id, create, skipped };
@@ -145,16 +152,20 @@ export const copyIgnorePolicies = defineTool({
         const [from, to] = await Promise.all([formatOrgId(config, data.source_org_id), formatOrgId(config, data.target_org_id)]);
         const lines = data.create.slice(0, 25).map((c) => {
           const d = c.content.action.data;
-          return `- ${c.content.name}: ${d.ignore_type}, ${d.expires ? `expires ${d.expires}` : "never expires"}; finding ${c.content.conditions_group.conditions[0]?.value ?? "?"}`;
+          return `- ${c.content.name}: ${d.ignore_type}, ${d.expires ? `expires ${d.expires}` : "never expires"}; finding ${c.content.conditions_group.conditions[0]?.value ?? "?"}${c.pending_in_source ? " (pending review in the source)" : ""}`;
         });
         const more = data.create.length > 25 ? `\n- …and ${data.create.length - 25} more (all in the plan below)` : "";
         const skipped = data.skipped.length
           ? `\n\nSkipped (${data.skipped.length}):\n${data.skipped.slice(0, 25).map((s) => `- ${s.name} (${s.id}): ${s.why}`).join("\n")}${data.skipped.length > 25 ? `\n- …and ${data.skipped.length - 25} more` : ""}`
           : "";
+        const pending = data.create.filter((c) => c.pending_in_source).length;
+        const pendingWarning = pending
+          ? `\n\nWarning: ${pending} of these ${pending === 1 ? "is" : "are"} still pending review in ${from}. In ${to} ${pending === 1 ? "it" : "they"} may take effect straight away if that org doesn't require approval for ignores.`
+          : "";
         const head = data.create.length
           ? `Dry run – will create ${data.create.length} ignore polic${data.create.length === 1 ? "y" : "ies"} in ${to}, copied from ${from} (one request each; not atomic). They will be created as this API token's user, and only hide findings where ${to} scans the same repository. The target org's ignore approval settings may put them in review.`
           : `Dry run – nothing to copy from ${from} to ${to}.`;
-        return `${head}${lines.length ? `\n\n${lines.join("\n")}${more}` : ""}${skipped}\n\nPlan:\n${JSON.stringify({ source_org_id: data.source_org_id, target_org_id: data.target_org_id, copy_policy_ids: data.create.map((c) => c.source_id) }, null, 2)}`;
+        return `${head}${lines.length ? `\n\n${lines.join("\n")}${more}` : ""}${pendingWarning}${skipped}\n\nPlan:\n${JSON.stringify({ source_org_id: data.source_org_id, target_org_id: data.target_org_id, copy_policy_ids: data.create.map((c) => c.source_id) }, null, 2)}`;
       },
       apply: async (data) => {
         const results: { source_id: string; name: string; ok: boolean; new_id?: string; error?: string }[] = [];

@@ -246,6 +246,8 @@ export const copyOrgSettings = defineTool({
       /** null when the source org's Secrets settings couldn't be read; the reason is in secrets_settings_unavailable. */
       secrets_settings_to_apply: rest.SecretsSettingsResource | null;
       secrets_settings_unavailable?: string;
+      /** The target's current on/off states, for the dry run's before → after lines (null = couldn't read). */
+      target_current: { sast_enabled: boolean | null; secrets_enabled: boolean | null };
     };
     return await runMutationTool<CopySettingsPlan>({
       action: "copy_org_settings",
@@ -255,7 +257,11 @@ export const copyOrgSettings = defineTool({
       bindingArgs: { source_org_id: parsed.source_org_id, target_org_id: parsed.target_org_id },
       buildPlanData: async () => {
         const safeSourceOrgId = sanitizePathSegment(parsed.source_org_id, "source_org_id");
-        const [settings_to_apply, sast_settings_to_apply, languageSettings, secrets] = await Promise.all([
+        const safeTargetOrgId = sanitizePathSegment(parsed.target_org_id, "target_org_id");
+        // The target's current state is read only to show what changes (e.g. Secrets on → off);
+        // a read failure just leaves that line as "unknown".
+        const soft = <T,>(p: Promise<T>) => p.then((v) => v, () => null);
+        const [settings_to_apply, sast_settings_to_apply, languageSettings, secrets, targetSast, targetSecrets] = await Promise.all([
           v1.getOrgSettings(config, safeSourceOrgId),
           rest.getSastSettings(config, safeSourceOrgId),
           rest.getLanguageSettings(config, safeSourceOrgId),
@@ -266,6 +272,8 @@ export const copyOrgSettings = defineTool({
             (resource) => ({ resource, error: undefined }),
             (err: unknown) => ({ resource: null, error: err instanceof Error ? err.message : String(err) })
           ),
+          soft(rest.getSastSettings(config, safeTargetOrgId)),
+          soft(rest.getSecretsSettings(config, safeTargetOrgId)),
         ]);
         return {
           source_org_id: parsed.source_org_id,
@@ -275,6 +283,10 @@ export const copyOrgSettings = defineTool({
           language_settings_to_apply: languageSettings.attributes.languages ?? {},
           secrets_settings_to_apply: secrets.resource,
           ...(secrets.error !== undefined ? { secrets_settings_unavailable: secrets.error } : {}),
+          target_current: {
+            sast_enabled: typeof targetSast?.attributes.sast_enabled === "boolean" ? targetSast.attributes.sast_enabled : null,
+            secrets_enabled: typeof targetSecrets?.attributes.secrets_enabled === "boolean" ? targetSecrets.attributes.secrets_enabled : null,
+          },
         };
       },
       describeDryRun: async (data) => {
@@ -294,7 +306,19 @@ export const copyOrgSettings = defineTool({
         const secretsWarning = data.secrets_settings_to_apply
           ? ""
           : `\n\nSecrets settings will NOT be copied: they couldn't be read from the source org. Secrets settings is Early Access: this usually means the source org doesn't have Snyk Secrets, or the token can't read its settings. The other settings are unaffected. Error: ${data.secrets_settings_unavailable}`;
-        return `Dry run – copy settings from ${sourceLabel} to ${targetLabel} (V1 org settings + SAST settings + ${languageSummary}${emptyNote}${secretsSummary}).${secretsWarning}\n\nPlan:\n${JSON.stringify(data, null, 2)}\n\nNote: only requestAccess and similar editable fields are copied from V1 org settings; SAST, Open Source language, and Secrets settings are copied via the REST API (Secrets settings is Early Access/beta).`;
+        const onOff = (v: boolean | null | undefined) => (v === true ? "on" : v === false ? "off" : "unknown");
+        const change = (label: string, from: boolean | null, to: boolean | undefined) => {
+          if (to === undefined) return null;
+          const line = `- ${label}: ${onOff(from)} → ${onOff(to)}${from === to ? " (no change)" : ""}`;
+          return from === true && to === false ? `${line} — this turns ${label} OFF in ${targetLabel}` : line;
+        };
+        const changes = [
+          change("Snyk Code (SAST)", data.target_current.sast_enabled, data.sast_settings_to_apply.attributes.sast_enabled),
+          data.secrets_settings_to_apply ? change("Snyk Secrets", data.target_current.secrets_enabled, data.secrets_settings_to_apply.attributes.secrets_enabled) : null,
+        ].filter(Boolean);
+        const turnsOff = changes.some((l) => l!.includes(" OFF in "));
+        const changeBlock = `\n\nIn ${targetLabel}:\n${changes.join("\n")}${turnsOff ? "\n\nWarning: this copy turns a product off in the target org, so it stops scanning with it." : ""}`;
+        return `Dry run – copy settings from ${sourceLabel} to ${targetLabel} (V1 org settings + SAST settings + ${languageSummary}${emptyNote}${secretsSummary}).${changeBlock}${secretsWarning}\n\nPlan:\n${JSON.stringify(data, null, 2)}\n\nNote: only requestAccess and similar editable fields are copied from V1 org settings; SAST, Open Source language, and Secrets settings are copied via the REST API (Secrets settings is Early Access/beta).`;
       },
       apply: async (data) => {
         const safeTargetOrgId = sanitizePathSegment(data.target_org_id, "target_org_id");
@@ -399,7 +423,9 @@ export const cloneIntegration = defineTool({
       // fail: Snyk returns the existing integration's ID and writes the source's settings and
       // credentials into it (verified live, 2026-11-10). So the dry run looks for one first.
       buildPlanData: async () => {
-        const targetIntegrations = integrationType ? await v1.listIntegrations(config, sanitizePathSegment(parsed.target_org_id, "target_org_id")) : {};
+        // Fresh, not the 60 s cache: this decides whether the dry run warns about an overwrite,
+        // and a clone moments ago may have added that integration type to the target.
+        const targetIntegrations = integrationType ? await v1.listIntegrations(config, sanitizePathSegment(parsed.target_org_id, "target_org_id"), { fresh: true }) : {};
         return {
           source_org_id: parsed.source_org_id,
           integration_id: parsed.integration_id,
@@ -423,6 +449,7 @@ export const cloneIntegration = defineTool({
           sanitizePathSegment(data.integration_id, "integration_id"),
           sanitizePathSegment(data.target_org_id, "target_org_id")
         );
+        v1.invalidateIntegrations(data.target_org_id);
         const doneTargetLabel = await formatOrgId(config, data.target_org_id);
         const doneIntegrationLabel = await formatIntegrationId(config, data.source_org_id, data.integration_id);
         return `Integration ${doneIntegrationLabel} cloned to ${doneTargetLabel}.\n\nResult: ${JSON.stringify(result, null, 2)}`;

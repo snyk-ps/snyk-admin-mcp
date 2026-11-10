@@ -1,5 +1,5 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { createApproval, peekApproval, discardApproval } from "./approval.js";
+import { createApproval, peekApproval, discardApproval, releaseApproval, reserveApproval } from "./approval.js";
 
 /**
  * Shared dry-run/approve/apply engine for every mutating MCP tool. Each mutating tool's
@@ -27,6 +27,28 @@ export interface ToolCallContext {
    * Throws if asking failed (e.g. the prompt timed out), and the apply is then not run.
    */
   confirm?: (request: { toolName: string; summary: string }) => Promise<ConfirmResult>;
+  /**
+   * Aborted when the client cancels this tool call (or gives up on it). Once aborted, nothing is
+   * applied: the client would never see the result, and its AI would likely redo the change.
+   */
+  signal?: AbortSignal;
+}
+
+/** Why asking for confirmation failed, judged from the error the prompt threw. */
+function confirmFailureText(err: unknown, signal: AbortSignal | undefined): string {
+  const message = err instanceof Error ? err.message : String(err);
+  const code = (err as { code?: unknown })?.code;
+  const kept = "Nothing was changed, and the approval token is still valid.";
+  if (signal?.aborted) return `Not applied: the request was cancelled while waiting for your confirmation. ${kept}`;
+  // -32001 is the MCP SDK's request timeout.
+  if (code === -32001 || /timed out/i.test(message)) {
+    return `Not applied: the confirmation prompt wasn't answered in time. ${kept} Call again with the same approval_token to show the prompt again.`;
+  }
+  // -32601 is "method not found": the client advertised elicitation but doesn't handle it.
+  if (code === -32601 || /does not support|not supported|method not found/i.test(message)) {
+    return `Not applied: your MCP client couldn't show the confirmation prompt (${message}). ${kept} If this client can't show prompts at all, whoever runs the server can set SNYK_ADMIN_CONFIRM=off; your client's own permission prompt is then the only check.`;
+  }
+  return `Not applied: couldn't get a confirmation from you through the MCP client (${message}). ${kept}`;
 }
 
 const callContext = new AsyncLocalStorage<ToolCallContext>();
@@ -94,7 +116,9 @@ export async function runMutationTool<TData>(opts: {
   if (opts.dryRun) {
     const data = await opts.buildPlanData();
     const description = await opts.describeDryRun(data);
-    const readable = description.split("\n\nPlan:")[0];
+    // For the confirmation prompt: drop the "Dry run – " lead-in, since by then it isn't one —
+    // ticking the box makes the change.
+    const readable = description.split("\n\nPlan:")[0].replace(/^Dry run – (\w)/, (_m, c: string) => c.toUpperCase());
     const summary = readable.length > MAX_CONFIRM_SUMMARY ? `${readable.slice(0, MAX_CONFIRM_SUMMARY)}…` : readable;
     const plan: MutationPlan<TData> = { action: opts.action, requestKey, data, summary };
     const approval_token = createApproval(plan);
@@ -121,22 +145,25 @@ export async function runMutationTool<TData>(opts: {
       isError: true,
     };
   }
+  // Claim the token before anything can wait: a confirmation prompt can stay open for minutes,
+  // and a retry with the same token in that time must not open a second prompt and apply twice.
+  if (!reserveApproval(token)) {
+    return {
+      content: [{ type: "text", text: "This approval_token is already being applied by another request (for example, waiting for your confirmation). Answer that prompt, or wait for it to finish." }],
+      isError: true,
+    };
+  }
+  const ctx = callContext.getStore();
   // The human check, when the client can show one: the token proves the apply matches the
   // previewed plan, but the AI holds it and can send it on its own. A confirmation prompt
   // (MCP elicitation) puts the decision in front of the person instead.
-  const confirm = callContext.getStore()?.confirm;
-  if (confirm) {
+  if (ctx?.confirm) {
     let result: ConfirmResult;
     try {
-      result = await confirm({ toolName: opts.toolName, summary: stored.summary });
+      result = await ctx.confirm({ toolName: opts.toolName, summary: stored.summary });
     } catch (err) {
-      return {
-        content: [{
-          type: "text",
-          text: `Not applied: couldn't get a confirmation from you through the MCP client (${err instanceof Error ? err.message : String(err)}). Nothing was changed, and the approval token is still valid. If your client can't show confirmation prompts, set SNYK_ADMIN_CONFIRM=off in the server's environment.`,
-        }],
-        isError: true,
-      };
+      releaseApproval(token);
+      return { content: [{ type: "text", text: confirmFailureText(err, ctx.signal) }], isError: true };
     }
     if (result === "declined") {
       // A declined plan can't be re-sent with the same token; a deliberate retry needs a new dry run.
@@ -146,6 +173,10 @@ export async function runMutationTool<TData>(opts: {
         isError: true,
       };
     }
+  }
+  if (ctx?.signal?.aborted) {
+    releaseApproval(token);
+    return { content: [{ type: "text", text: "Not applied: the request was cancelled before the change was made. Nothing was changed, and the approval token is still valid." }], isError: true };
   }
   // Consumed before applying so a client retry cannot execute the mutation twice.
   discardApproval(token);

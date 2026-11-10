@@ -67,31 +67,37 @@ const CONFIRM_TIMEOUT_MS = 5 * 60 * 1000;
  * Before an apply, ask the person through the MCP client (elicitation, a form with one
  * checkbox) whether to go ahead. Only a submitted form with the box ticked counts as yes.
  * Clients that don't support elicitation get "unavailable", so the token flow decides alone.
+ *
+ * The prompt is tied to the tool call's signal: if the client cancels or times out the call,
+ * the prompt is withdrawn and nothing is applied (the client would never see the result).
+ * `confirm` isn't a required field, so a client that leaves an unticked box out of its answer
+ * reads as a no rather than failing the SDK's schema check.
  */
-async function confirmApply({ toolName, summary }: { toolName: string; summary: string }): Promise<ConfirmResult> {
-  if (CONFIRM_OFF || !server.getClientCapabilities()?.elicitation?.form) return "unavailable";
-  const result = await server.elicitInput(
-    {
-      message: `Snyk Admin MCP wants to apply a change with ${toolName}:\n\n${summary}`,
-      requestedSchema: {
-        type: "object",
-        properties: {
-          confirm: { type: "boolean", title: "Apply this change", description: "Tick and submit to make this change in Snyk now. Decline to cancel it." },
+function confirmApplyFor(signal: AbortSignal) {
+  return async ({ toolName, summary }: { toolName: string; summary: string }): Promise<ConfirmResult> => {
+    if (CONFIRM_OFF || !server.getClientCapabilities()?.elicitation?.form) return "unavailable";
+    const result = await server.elicitInput(
+      {
+        message: `Snyk Admin MCP will make this change in Snyk with ${toolName} if you confirm:\n\n${summary}`,
+        requestedSchema: {
+          type: "object",
+          properties: {
+            confirm: { type: "boolean", title: "Apply this change", description: "Tick and submit to make this change in Snyk now. Decline to cancel it.", default: false },
+          },
         },
-        required: ["confirm"],
       },
-    },
-    { timeout: CONFIRM_TIMEOUT_MS }
-  );
-  return result.action === "accept" && result.content?.confirm === true ? "confirmed" : "declined";
+      { timeout: CONFIRM_TIMEOUT_MS, signal }
+    );
+    return result.action === "accept" && result.content?.confirm === true ? "confirmed" : "declined";
+  };
 }
 
 // The MCP SDK's expected return type for tools/call is a large union that a plain
 // ToolResult value doesn't structurally satisfy when passed through directly (a TypeScript
 // quirk with how it checks large unions against a non-literal object) — rebuilding a fresh
 // literal here from `result`'s fields is what makes this typecheck.
-server.setRequestHandler(CallToolRequestSchema, async (request) => {
-  const result = await handleToolCall(request.params.name, request.params.arguments, getConfig, { confirm: confirmApply });
+server.setRequestHandler(CallToolRequestSchema, async (request, extra) => {
+  const result = await handleToolCall(request.params.name, request.params.arguments, getConfig, { confirm: confirmApplyFor(extra.signal), signal: extra.signal });
   return { content: result.content, isError: result.isError };
 });
 

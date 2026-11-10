@@ -74,10 +74,10 @@ const integrationsCache = new Map<string, { map: Record<string, string>; at: num
  * (the common case, detected by every value being a string), and an `{ integrations: [...] }`
  * array form — both are converted to the same flat map so every caller only deals with one shape.
  */
-export async function listIntegrations(config: SnykApiConfig, orgId: string): Promise<Record<string, string>> {
+export async function listIntegrations(config: SnykApiConfig, orgId: string, opts: { fresh?: boolean } = {}): Promise<Record<string, string>> {
   const safe = sanitizePathSegment(orgId, "org_id");
   const cached = integrationsCache.get(safe);
-  if (cached && Date.now() - cached.at < INTEGRATIONS_TTL_MS) return cached.map;
+  if (!opts.fresh && cached && Date.now() - cached.at < INTEGRATIONS_TTL_MS) return cached.map;
 
   const res = await v1Fetch(config, `org/${safe}/integrations`);
   if (!res.ok) throw new Error(`V1 listIntegrations failed: ${res.status} ${await res.text()}`);
@@ -107,6 +107,11 @@ export async function getIntegrationTypeName(config: SnykApiConfig, orgId: strin
     if (id === integrationId) return typeName;
   }
   return null;
+}
+
+/** Drop an org's cached integration list, e.g. after a clone added or replaced one there. */
+export function invalidateIntegrations(orgId: string): void {
+  integrationsCache.delete(sanitizePathSegment(orgId, "org_id"));
 }
 
 /** True if this integration type is the Snyk CLI integration (not supported for clone). */

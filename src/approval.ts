@@ -13,6 +13,8 @@ const TTL_MS = 10 * 60 * 1000; // 10 minutes
 interface PendingApproval {
   plan: unknown;
   createdAt: number;
+  /** Set while an apply holding this token is in progress (e.g. waiting on a confirmation prompt). */
+  reserved?: boolean;
 }
 
 const store = new Map<string, PendingApproval>();
@@ -47,6 +49,26 @@ export function peekApproval(approvalToken: string): unknown {
     return null;
   }
   return p.plan;
+}
+
+/**
+ * Claim a token for one apply. Returns false if another apply already holds it — an apply can
+ * wait minutes on a confirmation prompt, and without this a retry with the same token during
+ * that wait could open a second prompt and apply the plan twice. Synchronous, so two calls can't
+ * both win. Pair with releaseApproval (apply didn't happen) or discardApproval (it did, or the
+ * plan was declined).
+ */
+export function reserveApproval(approvalToken: string): boolean {
+  const p = store.get(approvalToken);
+  if (!p || p.reserved) return false;
+  p.reserved = true;
+  return true;
+}
+
+/** Give a reserved token back unused, so a corrected retry can redeem it. */
+export function releaseApproval(approvalToken: string): void {
+  const p = store.get(approvalToken);
+  if (p) p.reserved = false;
 }
 
 /** Consume a pending approval, enforcing single use. */
