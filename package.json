@@ -1,6 +1,6 @@
 {
   "name": "snyk-admin-mcp",
-  "version": "2.0.1",
+  "version": "2.0.0",
   "description": "MCP server for Snyk platform admin: copy org settings (V1/SAST/languages/secrets), clone integrations, move projects, manage project tags and attributes, asset labels, and collections, list members, and search audit logs",
   "type": "module",
   "main": "dist/index.js",
