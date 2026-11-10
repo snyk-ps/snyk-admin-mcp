@@ -1076,3 +1076,96 @@ export async function createIgnorePolicy(config: SnykApiConfig, orgId: string, c
   const body = (await res.json()) as { data: IgnorePolicy };
   return body.data;
 }
+
+// ---------------------------------------------------------------------------
+// Read-only security checks: service accounts, installed Snyk Apps, Broker connections (GA).
+// ---------------------------------------------------------------------------
+
+/**
+ * A service account as listed. The API can also return `api_key`, `access_token`, and
+ * `client_secret` (documented as only on creation); this type leaves them out on purpose, and
+ * the tool builds its output from these fields only, so a credential can never reach the AI.
+ */
+export type ServiceAccount = {
+  id: string;
+  attributes: {
+    name?: string;
+    auth_type?: string;
+    level?: string;
+    role_id?: string;
+    created_at?: string;
+    access_token_ttl_seconds?: number;
+    access_token_expires_at?: string;
+    client_id?: string;
+  };
+};
+
+/** One page of an org's or group's service accounts. GET /orgs|groups/{id}/service_accounts. */
+export async function listServiceAccounts(
+  config: SnykApiConfig,
+  scope: "orgs" | "groups",
+  scopeId: string,
+  page: { limit?: number; starting_after?: string } = {}
+): Promise<{ data: ServiceAccount[]; links?: PageLinks }> {
+  const safeId = sanitizePathSegment(scopeId, scope === "orgs" ? "org_id" : "group_id");
+  const qs = buildQuery({ limit: page.limit, starting_after: page.starting_after });
+  const res = await restFetch(config, `/${scope}/${safeId}/service_accounts${qs}`);
+  if (!res.ok) throw new Error(`REST listServiceAccounts failed: ${res.status} ${await res.text()}`);
+  const body = (await res.json()) as { data?: { id: string; attributes?: Record<string, unknown> }[]; links?: PageLinks };
+  // Copy only the allowed fields, so secrets in the raw response go no further than this function.
+  const pick = (a: Record<string, unknown> = {}) => ({
+    name: a.name as string | undefined,
+    auth_type: a.auth_type as string | undefined,
+    level: a.level as string | undefined,
+    role_id: a.role_id as string | undefined,
+    created_at: a.created_at as string | undefined,
+    access_token_ttl_seconds: a.access_token_ttl_seconds as number | undefined,
+    access_token_expires_at: a.access_token_expires_at as string | undefined,
+    client_id: a.client_id as string | undefined,
+  });
+  return { data: (body.data ?? []).map((s) => ({ id: s.id, attributes: pick(s.attributes) })), links: body.links };
+}
+
+export type AppInstall = {
+  id: string;
+  attributes?: { client_id?: string; installed_at?: string };
+  relationships?: { app?: { data?: { id?: string; attributes?: { name?: string; client_id?: string; context?: string } } } };
+};
+
+/** One page of the Snyk Apps installed in an org or group, with each app's name. GET /orgs|groups/{id}/apps/installs?expand=app. */
+export async function listAppInstalls(
+  config: SnykApiConfig,
+  scope: "orgs" | "groups",
+  scopeId: string,
+  page: { limit?: number; starting_after?: string } = {}
+): Promise<{ data: AppInstall[]; links?: PageLinks }> {
+  const safeId = sanitizePathSegment(scopeId, scope === "orgs" ? "org_id" : "group_id");
+  const qs = buildQuery({ expand: "app", limit: page.limit, starting_after: page.starting_after });
+  const res = await restFetch(config, `/${scope}/${safeId}/apps/installs${qs}`);
+  if (!res.ok) throw new Error(`REST listAppInstalls failed: ${res.status} ${await res.text()}`);
+  return res.json() as Promise<{ data: AppInstall[]; links?: PageLinks }>;
+}
+
+export type BrokerConnection = { id: string; attributes?: { name?: string; connection_type?: string; deployment_id?: string; context?: string } };
+
+/** One page of an org's Broker connections. GET /orgs/{org_id}/brokers/connections. */
+export async function listBrokerConnections(
+  config: SnykApiConfig,
+  orgId: string,
+  page: { limit?: number; starting_after?: string } = {}
+): Promise<{ data: BrokerConnection[]; links?: PageLinks }> {
+  const safeOrgId = sanitizePathSegment(orgId, "org_id");
+  const qs = buildQuery({ limit: page.limit, starting_after: page.starting_after });
+  const res = await restFetch(config, `/orgs/${safeOrgId}/brokers/connections${qs}`);
+  if (!res.ok) throw new Error(`REST listBrokerConnections failed: ${res.status} ${await res.text()}`);
+  return res.json() as Promise<{ data: BrokerConnection[]; links?: PageLinks }>;
+}
+
+/** The group an org belongs to, or null if it has none or isn't visible. GET /orgs/{org_id}. */
+export async function getOrgGroupId(config: SnykApiConfig, orgId: string): Promise<string | null> {
+  const safeOrgId = sanitizePathSegment(orgId, "org_id");
+  const res = await restFetch(config, `/orgs/${safeOrgId}`);
+  if (!res.ok) return null;
+  const body = (await res.json()) as { data?: { attributes?: { group_id?: string } } };
+  return body.data?.attributes?.group_id ?? null;
+}

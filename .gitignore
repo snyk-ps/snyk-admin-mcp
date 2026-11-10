@@ -5,3 +5,7 @@ dist/
 NOTES.md
 Snyk API.json
 test/
+
+# MCP bundle build output (npm run bundle)
+build/
+*.mcpb

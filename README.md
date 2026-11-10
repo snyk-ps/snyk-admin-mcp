@@ -4,32 +4,19 @@ An MCP server for Snyk group admins. Every change goes through a dry run first.
 
 ## What it can do
 
-- **Orgs:** list orgs and integrations, create orgs, copy settings (V1, Snyk Code, Open Source languages, Secrets), and clone integrations between orgs.
-- **Projects:** find projects by name, tag, origin, or attributes; add or remove tags; set criticality, environment, lifecycle, test frequency, and owner; move projects between orgs.
+- **Orgs:** list orgs and integrations, create orgs, copy settings (V1, notifications, Snyk Code, Open Source languages, Secrets), and clone integrations between orgs.
+- **Projects:** find projects by name, tag, origin, or attributes; add or remove tags; set criticality, environment, lifecycle, test frequency, and owner; review pull request check settings; move projects between orgs.
 - **People and activity:** list org and group members and their roles, and search audit logs.
 - **Ignores:** list an org's Snyk Code ignore policies and copy them to another org.
+- **Security checks:** list service accounts (without their credentials), installed Snyk Apps, and Broker connections.
 - **Assets:** search, classify, label, and tag repositories, images, and packages, in both the Asset API and the Inventory API.
 - **Collections:** list, create, and update project collections.
 
 **[TOOLS.md](TOOLS.md) lists every tool, what it does, and the details that matter when you use it.**
 
-## Setup
+## Install
 
-Requires Node.js 22+.
-
-```bash
-npm install
-npm run build
-```
-
-Create a `.env` in the project root (it's gitignored), or set the same variables in your MCP client config:
-
-```bash
-SNYK_API_TOKEN=your-snyk-api-token   # SNYK_TOKEN also works
-SNYK_API_REGION=us-01                # optional, default us-01
-```
-
-Pick the region from the URL you sign in to ([Snyk regions](https://docs.snyk.io/snyk-data-and-governance/regional-hosting-and-data-residency)):
+You need a Snyk API token (or a service account key) with admin access to the orgs or group you'll manage, and your region:
 
 | Region | Snyk web app | Tenant |
 |--------|--------------|--------|
@@ -38,7 +25,47 @@ Pick the region from the URL you sign in to ([Snyk regions](https://docs.snyk.io
 | `eu-01` | `app.eu.snyk.io` | SNYK-EU-01 |
 | `au-01` | `app.au.snyk.io` | SNYK-AU-01 |
 
-Add it to any stdio MCP client (Claude Code, Claude Desktop, Cursor, Windsurf, …):
+See [Snyk regions](https://docs.snyk.io/snyk-data-and-governance/regional-hosting-and-data-residency) if you're not sure which one you're on.
+
+### Claude Desktop: install the bundle
+
+1. Download `snyk-admin-mcp-<version>.mcpb` from the [latest release](https://github.com/snyk-ps/snyk-admin-mcp/releases/latest).
+2. Double-click it, or drag it into Claude Desktop, or use **Settings > Extensions > Advanced settings > Install Extension…**.
+3. Enter your Snyk API token, and your region if it isn't `us-01`. Claude Desktop stores the token securely.
+
+Nothing else to install: Claude Desktop includes Node.js. To update, install the newer bundle the same way.
+
+### Other MCP clients: run from GitHub with npx
+
+Needs Node.js 22+ and git. Add this to your client's MCP config (Claude Code, Cursor, Windsurf, …):
+
+```json
+{
+  "mcpServers": {
+    "snyk-admin": {
+      "command": "npx",
+      "args": ["-y", "github:snyk-ps/snyk-admin-mcp"],
+      "env": { "SNYK_API_TOKEN": "your-token", "SNYK_API_REGION": "us-01" }
+    }
+  }
+}
+```
+
+- To pin a release, use `github:snyk-ps/snyk-admin-mcp#vX.Y.Z`.
+- The first start downloads and builds the server, which can take a minute. Run `npx -y github:snyk-ps/snyk-admin-mcp --version` once in a terminal first, so your client doesn't time out waiting.
+- Some clients use a different shape; VS Code, for example, uses a `servers` key with `"type": "stdio"`. On Windows, some clients need `"command": "cmd"` with `"args": ["/c", "npx", "-y", "github:snyk-ps/snyk-admin-mcp"]`.
+
+### From source
+
+Needs Node.js 22+.
+
+```bash
+git clone https://github.com/snyk-ps/snyk-admin-mcp.git
+cd snyk-admin-mcp
+npm install    # also builds dist/
+```
+
+Set `SNYK_API_TOKEN` (or `SNYK_TOKEN`) and `SNYK_API_REGION` in your MCP client's config, or in a `.env` file in the project root (it's gitignored), and point the client at the built server:
 
 ```json
 {
@@ -52,7 +79,7 @@ Add it to any stdio MCP client (Claude Code, Claude Desktop, Cursor, Windsurf, �
 }
 ```
 
-Leave out `env` if you use `.env`. Some clients use a different shape; VS Code, for example, uses a `servers` key with `"type": "stdio"`.
+To build the Claude Desktop bundle, run `npm run bundle`. It writes `build/snyk-admin-mcp-<version>.mcpb`, ready to attach to a release.
 
 ## Changes: dry run, then apply
 

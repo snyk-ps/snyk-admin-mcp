@@ -232,3 +232,58 @@ export async function createOrganization(
   if (!res.ok) throw new Error(`V1 createOrganization failed: ${res.status} ${await res.text()}`);
   return res.json() as Promise<Record<string, unknown>>;
 }
+
+// --- Org notification settings (V1) ---
+
+/**
+ * An org's default notification settings, keyed by notification type. Seen live:
+ * `{ "new-issues-remediations": { enabled, issueSeverity, issueType }, "weekly-report": { enabled },
+ * "test-limit": { enabled }, "project-imported": { enabled } }`.
+ */
+export type NotificationSettings = Record<string, Record<string, unknown>>;
+
+/** GET /org/{orgId}/notification-settings. */
+export async function getNotificationSettings(config: SnykApiConfig, orgId: string): Promise<NotificationSettings> {
+  const safe = sanitizePathSegment(orgId, "org_id");
+  const res = await v1Fetch(config, `org/${safe}/notification-settings`);
+  if (!res.ok) throw new Error(`V1 getNotificationSettings failed: ${res.status} ${await res.text()}`);
+  return res.json() as Promise<NotificationSettings>;
+}
+
+/** PUT /org/{orgId}/notification-settings with the same shape GET returns. */
+export async function updateNotificationSettings(config: SnykApiConfig, orgId: string, settings: NotificationSettings): Promise<NotificationSettings> {
+  const safe = sanitizePathSegment(orgId, "org_id");
+  const res = await v1Fetch(config, `org/${safe}/notification-settings`, { method: "PUT", body: JSON.stringify(settings) });
+  if (!res.ok) throw new Error(`V1 updateNotificationSettings failed: ${res.status} ${await res.text()}`);
+  return res.json() as Promise<NotificationSettings>;
+}
+
+// --- Project settings (V1): pull request checks and automatic fix / upgrade PRs ---
+
+/**
+ * One project's settings. Read-only here: V1 PUT on this path answers 200 without changing
+ * repo-connected projects, which inherit from their integration (see snyk_list_project_settings).
+ * The fields returned depend on the project; seen live: pullRequestTestEnabled,
+ * pullRequestFailOnAnyVulns, pullRequestFailOnlyForHighSeverity, pullRequestFailOnlyForIssuesWithFix,
+ * pullRequestTestCodeEnabled, pullRequestTestCodeSeverity, pullRequestFailOnAnyCodeIssues,
+ * pullRequestInheritance.
+ */
+export type ProjectSettings = Record<string, unknown>;
+
+/** GET /org/{orgId}/project/{projectId}/settings. */
+export async function getProjectSettings(config: SnykApiConfig, orgId: string, projectId: string): Promise<ProjectSettings> {
+  const safeOrg = sanitizePathSegment(orgId, "org_id");
+  const safeProject = sanitizePathSegment(projectId, "project_id");
+  const res = await v1Fetch(config, `org/${safeOrg}/project/${safeProject}/settings`);
+  if (!res.ok) throw new Error(`V1 getProjectSettings failed: ${res.status} ${await res.text()}`);
+  return res.json() as Promise<ProjectSettings>;
+}
+
+/** The roles defined in a group, as name and ID (V1 GET /group/{groupId}/roles). Used to name service accounts' roles. */
+export async function listGroupRoles(config: SnykApiConfig, groupId: string): Promise<{ name: string; publicId: string }[]> {
+  const safe = sanitizePathSegment(groupId, "group_id");
+  const res = await v1Fetch(config, `group/${safe}/roles`);
+  if (!res.ok) throw new Error(`V1 listGroupRoles failed: ${res.status} ${await res.text()}`);
+  const body = (await res.json()) as { name?: string; publicId?: string }[];
+  return (Array.isArray(body) ? body : []).filter((r) => r.name && r.publicId).map((r) => ({ name: r.name!, publicId: r.publicId! }));
+}

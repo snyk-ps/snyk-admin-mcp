@@ -1,0 +1,57 @@
+{
+  "manifest_version": "0.3",
+  "name": "snyk-admin-mcp",
+  "display_name": "Snyk Admin",
+  "version": "2.0.0",
+  "description": "Snyk group admin tools: org settings, projects, members, assets, collections, ignore policies, and audit logs. Every change is previewed first.",
+  "long_description": "Manage Snyk orgs and projects from Claude: copy org settings between orgs, clone integrations, create orgs, tag, classify, and move projects, label assets, manage collections and Snyk Code ignore policies, list members and service accounts, and search audit logs. Every tool that changes Snyk first returns a dry-run plan, and applies only that plan, after you confirm it. See TOOLS.md for every tool.",
+  "author": {
+    "name": "Snyk Ltd.",
+    "url": "https://snyk.io"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/snyk-ps/snyk-admin-mcp"
+  },
+  "homepage": "https://github.com/snyk-ps/snyk-admin-mcp",
+  "documentation": "https://github.com/snyk-ps/snyk-admin-mcp/blob/main/TOOLS.md",
+  "support": "https://github.com/snyk-ps/snyk-admin-mcp/issues",
+  "license": "Apache-2.0",
+  "keywords": ["snyk", "security", "admin", "organizations", "projects"],
+  "privacy_policies": ["https://snyk.io/policies/privacy/"],
+  "server": {
+    "type": "node",
+    "entry_point": "dist/index.js",
+    "mcp_config": {
+      "command": "node",
+      "args": ["${__dirname}/dist/index.js"],
+      "env": {
+        "SNYK_API_TOKEN": "${user_config.snyk_api_token}",
+        "SNYK_API_REGION": "${user_config.snyk_api_region}"
+      }
+    }
+  },
+  "tools_generated": false,
+  "user_config": {
+    "snyk_api_token": {
+      "type": "string",
+      "title": "Snyk API token",
+      "description": "A Snyk API token or service account key with admin access to the orgs or group you'll manage. Create one in Snyk under your account settings, or as a service account.",
+      "sensitive": true,
+      "required": true
+    },
+    "snyk_api_region": {
+      "type": "string",
+      "title": "Snyk region",
+      "description": "Where your Snyk account is hosted: us-01 (app.snyk.io, the default), us-02 (app.us.snyk.io), eu-01 (app.eu.snyk.io), or au-01 (app.au.snyk.io).",
+      "default": "us-01",
+      "required": false
+    }
+  },
+  "compatibility": {
+    "platforms": ["darwin", "win32"],
+    "runtimes": {
+      "node": ">=22.0.0"
+    }
+  }
+}

@@ -26,16 +26,29 @@ const { version: SERVER_VERSION } = JSON.parse(
 import { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprotocol/sdk/types.js";
-import type { SnykApiConfig, SnykRegion } from "./snyk/types.js";
+import { REGION_HOSTS, type SnykApiConfig, type SnykRegion } from "./snyk/types.js";
 import { handleToolCall, listTools } from "./tools/index.js";
 import type { ConfirmResult } from "./mutation.js";
 
-const SNYK_TOKEN = process.env.SNYK_API_TOKEN ?? process.env.SNYK_TOKEN ?? "";
-const SNYK_REGION = (process.env.SNYK_API_REGION ?? "us-01") as SnykRegion;
+// `--version` prints the version and exits without starting the server, so an install (e.g.
+// `npx -y github:snyk-ps/snyk-admin-mcp --version`) can be checked or pre-built from a terminal.
+// Only on an explicit flag: in normal use stdout belongs to the MCP protocol.
+if (process.argv.includes("--version")) {
+  process.stdout.write(`${SERVER_VERSION}\n`);
+  process.exit(0);
+}
+
+// Empty counts as unset: an MCP bundle passes an optional setting the person left blank as "".
+const envValue = (name: string) => process.env[name]?.trim() || undefined;
+const SNYK_TOKEN = envValue("SNYK_API_TOKEN") ?? envValue("SNYK_TOKEN") ?? "";
+const SNYK_REGION = (envValue("SNYK_API_REGION") ?? "us-01") as SnykRegion;
 
 /** Build the API config from env vars, read once per tool call. Throws if no token is configured. */
 function getConfig(): SnykApiConfig {
   if (!SNYK_TOKEN) throw new Error("SNYK_API_TOKEN or SNYK_TOKEN environment variable is required");
+  if (!(SNYK_REGION in REGION_HOSTS)) {
+    throw new Error(`SNYK_API_REGION must be one of ${Object.keys(REGION_HOSTS).join(", ")} (got "${SNYK_REGION}")`);
+  }
   return { token: SNYK_TOKEN, region: SNYK_REGION };
 }
 

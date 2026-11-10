@@ -14,6 +14,12 @@ Every tool the Snyk Admin MCP server provides, grouped by the section of the [Sn
 - Copy, move, and clone refuse the same org as source and target.
 - **The Asset and Inventory Assets APIs are separate stores.** IDs differ (Asset: 32 hex characters; Inventory: dashed UUIDs), and neither API accepts the other's. Labels and tags are separate too: a label set in one doesn't show in the other.
 
+## [Apps](https://docs.snyk.io/developer-tools/snyk-api/reference/apps)
+
+| Tool | What it does |
+|------|--------------|
+| `snyk_list_app_installs` | List the Snyk Apps installed in an org or group (e.g. Jira, Bitbucket Cloud), with install dates. |
+
 ## [Asset](https://docs.snyk.io/developer-tools/snyk-api/reference/asset)
 
 Early Access. Group scope; repositories, images, packages.
@@ -81,10 +87,10 @@ Early Access. Org or group scope; repositories, images, SBOMs.
 
 | Tool | What it does |
 |------|--------------|
-| `snyk_copy_org_settings` ✎ | Copy V1, SAST, Open Source language, and Secrets settings to another org. |
+| `snyk_copy_org_settings` ✎ | Copy V1, notification, SAST, Open Source language, and Secrets settings to another org. |
 | `snyk_create_organization` ✎ | Create an org, optionally copying settings from a template org. |
 
-- The `snyk_copy_org_settings` dry run shows the target's Snyk Code and Snyk Secrets state before and after, and warns if the copy would turn either one off.
+- The `snyk_copy_org_settings` dry run shows the target's Snyk Code and Snyk Secrets state before and after, and warns if the copy would turn either one off. It also lists each notification setting that would change (the org's default alerts, such as the severity that triggers new-issue emails).
 - `snyk_copy_org_settings` also uses the [SastSettings](https://docs.snyk.io/developer-tools/snyk-api/reference/sastsettings), [LanguagesSettings](https://docs.snyk.io/developer-tools/snyk-api/reference/languagessettings), and [SecretsSettings](https://docs.snyk.io/developer-tools/snyk-api/reference/secretssettings) APIs. It applies the four parts separately and reports each one. For V1 settings it copies only the fields the API lets you edit (e.g. `requestAccess`). If the source org's Secrets settings can't be read (usually because it has no Snyk Secrets), that part is skipped.
 
 ## [Orgs](https://docs.snyk.io/developer-tools/snyk-api/reference/orgs)
@@ -114,10 +120,12 @@ Snyk Code consistent ignores. Org scope; the org needs "Ignores across the repos
 | Tool | What it does |
 |------|--------------|
 | `snyk_add_project_tags` ✎ | Add tags to many projects. |
+| `snyk_list_project_settings` | Show projects' pull request check settings, and whether each inherits them from its integration. |
 | `snyk_move_projects` ✎ | Move projects to another org. |
 | `snyk_remove_project_tags` ✎ | Remove tags, by key, from many projects. |
 
 - The dry runs check every project ID is in the org first, and stop if one isn't.
+- Projects imported from a repo inherit their pull request check settings from the integration (`pullRequestInheritance: "integration"`); CLI projects have none. Snyk's V1 API accepts writes to these project settings but doesn't apply them, so there's no tool to change them per project.
 - Project tags are not asset labels.
 - `snyk_move_projects` needs group admin. Moving across groups needs a personal API key, not a service account key.
 
@@ -129,3 +137,17 @@ Snyk Code consistent ignores. Org scope; the org needs "Ignores across the repos
 | `snyk_update_projects` ✎ | Set business criticality, environment, lifecycle, test frequency, or owner on many projects. |
 
 - `snyk_update_projects` replaces each attribute list you pass (`[]` clears it) and keeps the ones you leave out. It doesn't change tags; use the tag tools. Owners are user IDs from `snyk_list_members`. The dry run checks every project ID is in the org first.
+
+## [ServiceAccounts](https://docs.snyk.io/developer-tools/snyk-api/reference/serviceaccounts)
+
+| Tool | What it does |
+|------|--------------|
+| `snyk_list_service_accounts` | List an org's or group's service accounts: how each authenticates, its role, and when it was created. |
+
+- Never returns API keys, tokens, or secrets. Flags accounts that use a long-lived API key rather than OAuth.
+
+## [Universal Broker](https://docs.snyk.io/developer-tools/snyk-api/reference/universal-broker)
+
+| Tool | What it does |
+|------|--------------|
+| `snyk_list_broker_connections` | List the Broker connections an org uses, with their type and deployment. |

@@ -12,7 +12,8 @@ import type { SnykApiConfig } from "../snyk/types.js";
 import { type ToolCallContext, type ToolResult, withToolCallContext } from "../mutation.js";
 import { type Tool, toInputSchema } from "./types.js";
 import { cloneIntegration, copyOrgSettings, createOrganization, listIntegrations, listOrgs, listProjects } from "./orgs.js";
-import { addProjectTags, moveProjects, removeProjectTags, updateProjects } from "./projects.js";
+import { addProjectTags, listProjectSettings, moveProjects, removeProjectTags, updateProjects } from "./projects.js";
+import { listAppInstalls, listBrokerConnections, listServiceAccounts } from "./security.js";
 import { listMembers } from "./members.js";
 import { copyIgnorePolicies, listIgnorePolicies } from "./policies.js";
 import { searchAuditLogs } from "./audit.js";
@@ -31,7 +32,11 @@ export const TOOLS: readonly Tool[] = [
   listOrgs,
   listIntegrations,
   listProjects,
+  listProjectSettings,
   listMembers,
+  listServiceAccounts,
+  listAppInstalls,
+  listBrokerConnections,
   listIgnorePolicies,
   copyIgnorePolicies,
   searchAuditLogs,

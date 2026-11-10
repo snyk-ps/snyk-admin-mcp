@@ -1,9 +1,18 @@
 {
   "name": "snyk-admin-mcp",
   "version": "2.0.0",
-  "description": "MCP server for Snyk platform admin: copy org settings (V1/SAST/languages/secrets), clone integrations, move projects, manage project tags and attributes, asset labels, and collections, list members, and search audit logs",
+  "description": "MCP server for Snyk group admins: copy org settings, clone integrations, create orgs, tag, classify, and move projects, label assets, manage collections and ignore policies, list members and service accounts, and search audit logs",
   "type": "module",
   "main": "dist/index.js",
+  "bin": {
+    "snyk-admin-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "LICENSE",
+    "README.md",
+    "TOOLS.md"
+  ],
   "private": true,
   "license": "Apache-2.0",
   "repository": {
@@ -12,9 +21,11 @@
   },
   "scripts": {
     "build": "tsc",
+    "prepare": "tsc",
     "start": "node dist/index.js",
     "dev": "tsc && node dist/index.js",
-    "test": "npm run build && node --test test/*.test.js"
+    "test": "npm run build && node --test test/*.test.js",
+    "bundle": "npm run build && node scripts/build-mcpb.mjs"
   },
   "engines": {
     "node": ">=22"

@@ -11,7 +11,7 @@ import * as rest from "../snyk/rest.js";
 import * as v1 from "../snyk/v1.js";
 import { sanitizePathSegment } from "../snyk/types.js";
 import { runMutationTool } from "../mutation.js";
-import { ADDITIVE, DESTRUCTIVE, defineTool } from "./types.js";
+import { ADDITIVE, DESTRUCTIVE, READ_ONLY, defineTool } from "./types.js";
 import { formatOrgId, requireProjectsInOrg } from "./format.js";
 import { sameOrgError } from "./guards.js";
 
@@ -323,5 +323,50 @@ export const updateProjects = defineTool({
         return `${summary}\n\nResults:\n${JSON.stringify(results, null, 2)}`;
       },
     });
+  },
+});
+
+// --- Project settings (V1): pull request checks and automatic fix / upgrade PRs ---
+
+/** "a=1, b=x" for the keys of `s`, with nested objects flattened as parent.child. */
+function flatEntries(s: Record<string, unknown>, prefix = ""): [string, unknown][] {
+  return Object.entries(s).flatMap(([k, v]) =>
+    v && typeof v === "object" && !Array.isArray(v) ? flatEntries(v as Record<string, unknown>, `${prefix}${k}.`) : [[`${prefix}${k}`, v] as [string, unknown]]
+  );
+}
+
+const ListProjectSettingsArgsSchema = z.object({
+  org_id: z.string().describe("Organization ID"),
+  project_ids: z.array(z.string().min(1)).min(1).max(100).describe("Project IDs (from snyk_list_projects)"),
+});
+
+/**
+ * Read-only on purpose. Writing these through V1 PUT /org/{org}/project/{id}/settings was
+ * live-tested (2026-11-10) on SAST, npm, and Secrets projects from the GitHub Cloud App and
+ * GitLab integrations: every PUT answered 200 and changed nothing, including when
+ * `pullRequestInheritance` was sent. Projects connected to a repo have
+ * `pullRequestInheritance: "integration"`, so their pull request checks come from the
+ * integration's settings; CLI projects have none. An update tool was built, caught this with
+ * its read-back check, and was removed rather than shipped.
+ */
+export const listProjectSettings = defineTool({
+  name: "snyk_list_project_settings",
+  description: "Show projects' pull request check settings for Snyk Open Source and Snyk Code (V1), one line per project, including pullRequestInheritance: \"integration\" means the project uses its integration's settings (the usual case for projects imported from a repo). Use it to audit, e.g., which projects have PR checks off. CLI projects have no such settings. Read-only.",
+  schema: ListProjectSettingsArgsSchema,
+  annotations: READ_ONLY,
+  handler: async (a, config) => {
+    const found = await requireProjectsInOrg(config, a.org_id, a.project_ids);
+    const ids = [...new Set(a.project_ids.map((id) => id.toLowerCase()))];
+    const rows = await Promise.all(ids.map(async (id) => {
+      try {
+        const s = await v1.getProjectSettings(config, a.org_id, id);
+        const fields = flatEntries(s).map(([k, v]) => `${k}=${JSON.stringify(v)}`).join(", ");
+        return `${nameOf(found.get(id), id)}: ${fields || "(no pull request check settings, e.g. a CLI project)"}`;
+      } catch (err) {
+        return `${nameOf(found.get(id), id)}: couldn't read settings (${err instanceof Error ? err.message : String(err)})`;
+      }
+    }));
+    const where = await formatOrgId(config, a.org_id);
+    return { content: [{ type: "text", text: `Settings for ${ids.length} project(s) in ${where}:\n\n${rows.join("\n")}` }], isError: false };
   },
 });

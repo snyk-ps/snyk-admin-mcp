@@ -65,7 +65,7 @@ export interface SnykApiConfig {
   region?: SnykRegion;
 }
 
-const REGION_HOSTS: Record<SnykRegion, string> = {
+export const REGION_HOSTS: Record<SnykRegion, string> = {
   "us-01": "https://api.snyk.io",
   "us-02": "https://api.us.snyk.io",
   "eu-01": "https://api.eu.snyk.io",

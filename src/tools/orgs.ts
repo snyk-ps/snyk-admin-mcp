@@ -231,7 +231,7 @@ export const createOrganization = defineTool({
 
 export const copyOrgSettings = defineTool({
   name: "snyk_copy_org_settings",
-  description: "Copy organization settings from a source org to a target org: V1 org settings (e.g. requestAccess) via Snyk's V1 API, plus SAST settings (whether Snyk Code is on), Open Source language settings, and Secrets settings (all via the REST API; Secrets settings is Early Access/beta). Always run with dry_run=true first to get a plan and approval_token, then run with dry_run=false and approval_token to apply.",
+  description: "Copy organization settings from a source org to a target org: V1 org settings (e.g. requestAccess) and default notification settings via Snyk's V1 API, plus SAST settings (whether Snyk Code is on), Open Source language settings, and Secrets settings (all via the REST API; Secrets settings is Early Access/beta). Always run with dry_run=true first to get a plan and approval_token, then run with dry_run=false and approval_token to apply.",
   schema: CopySettingsArgsSchema,
   annotations: DESTRUCTIVE,
   handler: async (parsed, config) => {
@@ -247,7 +247,10 @@ export const copyOrgSettings = defineTool({
       secrets_settings_to_apply: rest.SecretsSettingsResource | null;
       secrets_settings_unavailable?: string;
       /** The target's current on/off states, for the dry run's before → after lines (null = couldn't read). */
-      target_current: { sast_enabled: boolean | null; secrets_enabled: boolean | null };
+      target_current: { sast_enabled: boolean | null; secrets_enabled: boolean | null; notification_settings: v1.NotificationSettings | null };
+      /** The source org's default notification settings (V1); null when they couldn't be read. */
+      notification_settings_to_apply: v1.NotificationSettings | null;
+      notification_settings_unavailable?: string;
     };
     return await runMutationTool<CopySettingsPlan>({
       action: "copy_org_settings",
@@ -261,7 +264,7 @@ export const copyOrgSettings = defineTool({
         // The target's current state is read only to show what changes (e.g. Secrets on → off);
         // a read failure just leaves that line as "unknown".
         const soft = <T,>(p: Promise<T>) => p.then((v) => v, () => null);
-        const [settings_to_apply, sast_settings_to_apply, languageSettings, secrets, targetSast, targetSecrets] = await Promise.all([
+        const [settings_to_apply, sast_settings_to_apply, languageSettings, secrets, targetSast, targetSecrets, notifications, targetNotifications] = await Promise.all([
           v1.getOrgSettings(config, safeSourceOrgId),
           rest.getSastSettings(config, safeSourceOrgId),
           rest.getLanguageSettings(config, safeSourceOrgId),
@@ -274,6 +277,11 @@ export const copyOrgSettings = defineTool({
           ),
           soft(rest.getSastSettings(config, safeTargetOrgId)),
           soft(rest.getSecretsSettings(config, safeTargetOrgId)),
+          v1.getNotificationSettings(config, safeSourceOrgId).then(
+            (settings) => ({ settings, error: undefined }),
+            (err: unknown) => ({ settings: null, error: err instanceof Error ? err.message : String(err) })
+          ),
+          soft(v1.getNotificationSettings(config, safeTargetOrgId)),
         ]);
         return {
           source_org_id: parsed.source_org_id,
@@ -286,7 +294,10 @@ export const copyOrgSettings = defineTool({
           target_current: {
             sast_enabled: typeof targetSast?.attributes.sast_enabled === "boolean" ? targetSast.attributes.sast_enabled : null,
             secrets_enabled: typeof targetSecrets?.attributes.secrets_enabled === "boolean" ? targetSecrets.attributes.secrets_enabled : null,
+            notification_settings: targetNotifications,
           },
+          notification_settings_to_apply: notifications.settings,
+          ...(notifications.error !== undefined ? { notification_settings_unavailable: notifications.error } : {}),
         };
       },
       describeDryRun: async (data) => {
@@ -316,9 +327,28 @@ export const copyOrgSettings = defineTool({
           change("Snyk Code (SAST)", data.target_current.sast_enabled, data.sast_settings_to_apply.attributes.sast_enabled),
           data.secrets_settings_to_apply ? change("Snyk Secrets", data.target_current.secrets_enabled, data.secrets_settings_to_apply.attributes.secrets_enabled) : null,
         ].filter(Boolean);
+        // Notification settings: one line per setting that differs, e.g. new-issues-remediations.issueSeverity "all" → "high".
+        if (data.notification_settings_to_apply) {
+          const flat = (o: v1.NotificationSettings | null) =>
+            Object.fromEntries(Object.entries(o ?? {}).flatMap(([k, v]) => Object.entries(v ?? {}).map(([sub, x]) => [`${k}.${sub}`, x])));
+          const from = flat(data.target_current.notification_settings);
+          const to = flat(data.notification_settings_to_apply);
+          const diffs = Object.keys({ ...from, ...to }).filter((k) => JSON.stringify(from[k]) !== JSON.stringify(to[k]));
+          changes.push(
+            data.target_current.notification_settings === null
+              ? "- Notification settings: current values unknown; the source's will replace them"
+              : diffs.length
+                ? `- Notification settings: ${diffs.map((k) => `${k} ${JSON.stringify(from[k])} → ${JSON.stringify(to[k])}`).join("; ")}`
+                : "- Notification settings: (no change)"
+          );
+        }
         const turnsOff = changes.some((l) => l!.includes(" OFF in "));
         const changeBlock = `\n\nIn ${targetLabel}:\n${changes.join("\n")}${turnsOff ? "\n\nWarning: this copy turns a product off in the target org, so it stops scanning with it." : ""}`;
-        return `Dry run – copy settings from ${sourceLabel} to ${targetLabel} (V1 org settings + SAST settings + ${languageSummary}${emptyNote}${secretsSummary}).${changeBlock}${secretsWarning}\n\nPlan:\n${JSON.stringify(data, null, 2)}\n\nNote: only requestAccess and similar editable fields are copied from V1 org settings; SAST, Open Source language, and Secrets settings are copied via the REST API (Secrets settings is Early Access/beta).`;
+        const notificationsSummary = data.notification_settings_to_apply ? " + notification settings" : "";
+        const notificationsWarning = data.notification_settings_to_apply
+          ? ""
+          : `\n\nNotification settings will NOT be copied: they couldn't be read from the source org. Error: ${data.notification_settings_unavailable}`;
+        return `Dry run – copy settings from ${sourceLabel} to ${targetLabel} (V1 org settings + SAST settings + ${languageSummary}${emptyNote}${secretsSummary}${notificationsSummary}).${changeBlock}${secretsWarning}${notificationsWarning}\n\nPlan:\n${JSON.stringify(data, null, 2)}\n\nNote: only requestAccess and similar editable fields are copied from V1 org settings; SAST, Open Source language, and Secrets settings are copied via the REST API (Secrets settings is Early Access/beta).`;
       },
       apply: async (data) => {
         const safeTargetOrgId = sanitizePathSegment(data.target_org_id, "target_org_id");
@@ -341,6 +371,12 @@ export const copyOrgSettings = defineTool({
         await record("SAST settings", () =>
           rest.updateSastSettings(config, safeTargetOrgId, data.sast_settings_to_apply)
         );
+        const notificationSettings = data.notification_settings_to_apply;
+        if (notificationSettings) {
+          await record("notification settings", () => v1.updateNotificationSettings(config, safeTargetOrgId, notificationSettings));
+        } else {
+          steps.push({ step: "notification settings", ok: true, skipped: true, note: `not copied: couldn't read the source org's notification settings (${data.notification_settings_unavailable})` });
+        }
         const secretsSettings = data.secrets_settings_to_apply;
         if (secretsSettings) {
           await record("Secrets settings", () =>
@@ -380,7 +416,7 @@ export const copyOrgSettings = defineTool({
         const applied = steps.length - failed.length - skipped.length;
         const targetLabel = await formatOrgId(config, data.target_org_id);
         const secretsSkipped = !secretsSettings;
-        const languageSkips = skipped.length - (secretsSkipped ? 1 : 0);
+        const languageSkips = skipped.length - (secretsSkipped ? 1 : 0) - (notificationSettings ? 0 : 1);
         const skippedNote = languageSkips ? ` (${languageSkips} skipped — nothing configured at the source)` : "";
         const secretsNote = secretsSkipped ? " Secrets settings were not copied: they couldn't be read from the source org (see steps)." : "";
         const summary = failed.length === 0
