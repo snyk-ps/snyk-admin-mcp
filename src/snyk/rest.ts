@@ -515,8 +515,8 @@ export type SecretsSettingsResource = {
 
 /**
  * Get Secrets settings for an org (REST API, JSON:API, Early Access/beta).
- * GET /orgs/{org_id}/settings/secrets. Confirmed from Snyk's OpenAPI spec — this resource is
- * only released under the `2024-10-15~beta` version, not the plain dated version used elsewhere.
+ * GET /orgs/{org_id}/settings/secrets. Only released as `2024-10-15~beta`, but requested with the
+ * plain date: asking for `~beta` now 404s for every org (see SECRETS_SETTINGS_API_VERSION).
  */
 export async function getSecretsSettings(config: SnykApiConfig, orgId: string): Promise<SecretsSettingsResource> {
   const safeOrgId = sanitizePathSegment(orgId, "org_id");

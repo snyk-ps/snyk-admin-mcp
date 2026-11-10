@@ -293,8 +293,8 @@ export const copyOrgSettings = defineTool({
           : "";
         const secretsWarning = data.secrets_settings_to_apply
           ? ""
-          : `\n\nSecrets settings will NOT be copied: they couldn't be read from the source org. Secrets settings is Early Access, so this usually means the source org doesn't have Snyk Secrets. The other settings are unaffected. Error: ${data.secrets_settings_unavailable}`;
-        return `Dry run – copy settings from ${sourceLabel} to ${targetLabel} (V1 org settings + SAST settings + ${languageSummary}${emptyNote}${secretsSummary}).${secretsWarning}\n\nPlan:\n${JSON.stringify(data, null, 2)}\n\nNote: only requestAccess and similar editable fields are copied from V1 org settings; SAST, Open Source language, and Secrets settings are copied via the REST API (Secrets settings is Early Access/beta — version 2024-10-15~beta).`;
+          : `\n\nSecrets settings will NOT be copied: they couldn't be read from the source org. Secrets settings is Early Access: this usually means the source org doesn't have Snyk Secrets, or the token can't read its settings. The other settings are unaffected. Error: ${data.secrets_settings_unavailable}`;
+        return `Dry run – copy settings from ${sourceLabel} to ${targetLabel} (V1 org settings + SAST settings + ${languageSummary}${emptyNote}${secretsSummary}).${secretsWarning}\n\nPlan:\n${JSON.stringify(data, null, 2)}\n\nNote: only requestAccess and similar editable fields are copied from V1 org settings; SAST, Open Source language, and Secrets settings are copied via the REST API (Secrets settings is Early Access/beta).`;
       },
       apply: async (data) => {
         const safeTargetOrgId = sanitizePathSegment(data.target_org_id, "target_org_id");

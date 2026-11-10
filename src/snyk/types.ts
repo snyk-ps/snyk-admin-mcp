@@ -22,12 +22,14 @@ export const REST_API_VERSION = "2024-10-15";
 export const ASSET_API_VERSION = "2026-03-25";
 
 /**
- * Version for the Secrets Settings endpoints. Confirmed from the OpenAPI spec
- * (`x-snyk-api-version`): this is a `~beta` release, not the plain dated version
- * used elsewhere — passing the default REST_API_VERSION here would request a
- * version this beta-only resource doesn't exist under.
+ * Version for the Secrets Settings endpoints (Early Access). The spec lists them only under
+ * `2024-10-15~beta`, but the live API now answers 404 "Not Found" when that `~beta` version
+ * is requested, for every org, including ones with Snyk Secrets (verified 2026-11-10). That
+ * 404 was being read as "this org has no Snyk Secrets", so Secrets settings were never
+ * copied. Requesting the plain date works: the API serves `2024-10-15~beta` (per the
+ * `snyk-version-served` header), the same as for Inventory below.
  */
-export const SECRETS_SETTINGS_API_VERSION = "2024-10-15~beta";
+export const SECRETS_SETTINGS_API_VERSION = "2024-10-15";
 
 /**
  * Version for the Inventory Assets endpoints (Early Access). The spec lists them only under
