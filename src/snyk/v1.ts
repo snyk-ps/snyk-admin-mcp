@@ -287,3 +287,30 @@ export async function listGroupRoles(config: SnykApiConfig, groupId: string): Pr
   const body = (await res.json()) as { name?: string; publicId?: string }[];
   return (Array.isArray(body) ? body : []).filter((r) => r.name && r.publicId).map((r) => ({ name: r.name!, publicId: r.publicId! }));
 }
+
+// --- Integration settings (V1): pull request checks and automatic PRs, per integration per org ---
+
+/** One integration's settings in one org, e.g. pullRequestTestEnabled, autoRemediationPrs. `{}` for CLI, Docker Hub, Kubernetes. */
+export type IntegrationSettings = Record<string, unknown>;
+
+/** GET /org/{orgId}/integrations/{integrationId}/settings. */
+export async function getIntegrationSettings(config: SnykApiConfig, orgId: string, integrationId: string): Promise<IntegrationSettings> {
+  const safeOrg = sanitizePathSegment(orgId, "org_id");
+  const safeId = sanitizePathSegment(integrationId, "integration_id");
+  const res = await v1Fetch(config, `org/${safeOrg}/integrations/${safeId}/settings`);
+  if (!res.ok) throw new Error(`V1 getIntegrationSettings failed: ${res.status} ${await res.text()}`);
+  return res.json() as Promise<IntegrationSettings>;
+}
+
+/**
+ * PUT /org/{orgId}/integrations/{integrationId}/settings with only the fields to change. A
+ * partial body changes just those fields and keeps the rest (verified live, 2026-11-12); the
+ * response is the full settings.
+ */
+export async function updateIntegrationSettings(config: SnykApiConfig, orgId: string, integrationId: string, settings: IntegrationSettings): Promise<IntegrationSettings> {
+  const safeOrg = sanitizePathSegment(orgId, "org_id");
+  const safeId = sanitizePathSegment(integrationId, "integration_id");
+  const res = await v1Fetch(config, `org/${safeOrg}/integrations/${safeId}/settings`, { method: "PUT", body: JSON.stringify(settings) });
+  if (!res.ok) throw new Error(`V1 updateIntegrationSettings failed: ${res.status} ${await res.text()}`);
+  return res.json() as Promise<IntegrationSettings>;
+}

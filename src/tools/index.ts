@@ -15,6 +15,7 @@ import { cloneIntegration, copyOrgSettings, createOrganization, listIntegrations
 import { addProjectTags, listProjectSettings, moveProjects, removeProjectTags, updateProjects } from "./projects.js";
 import { listAppInstalls, listBrokerConnections, listServiceAccounts } from "./security.js";
 import { listMembers } from "./members.js";
+import { listIntegrationSettings, updateIntegrationSettings } from "./integrations.js";
 import { copyIgnorePolicies, listIgnorePolicies } from "./policies.js";
 import { searchAuditLogs } from "./audit.js";
 import { getAsset, listAssetProjects, listRelatedAssets, searchAssets, updateAssets } from "./assets.js";
@@ -24,6 +25,7 @@ import { createCollection, listCollectionProjects, listCollections, updateCollec
 export const TOOLS: readonly Tool[] = [
   copyOrgSettings,
   cloneIntegration,
+  updateIntegrationSettings,
   addProjectTags,
   removeProjectTags,
   moveProjects,
@@ -31,6 +33,7 @@ export const TOOLS: readonly Tool[] = [
   createOrganization,
   listOrgs,
   listIntegrations,
+  listIntegrationSettings,
   listProjects,
   listProjectSettings,
   listMembers,

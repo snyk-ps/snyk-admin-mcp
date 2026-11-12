@@ -4,7 +4,7 @@ An MCP server for Snyk group admins. Every change goes through a dry run first.
 
 ## What it can do
 
-- **Orgs:** list orgs and integrations, create orgs, copy settings (V1, notifications, Snyk Code, Open Source languages, Secrets), and clone integrations between orgs.
+- **Orgs:** list orgs and integrations, create orgs, copy settings (V1, notifications, Snyk Code, Open Source languages, Secrets), clone integrations between orgs, and review or set integrations' pull request check settings across many orgs.
 - **Projects:** find projects by name, tag, origin, or attributes; add or remove tags; set criticality, environment, lifecycle, test frequency, and owner; review pull request check settings; move projects between orgs.
 - **People and activity:** list org and group members and their roles, and search audit logs.
 - **Ignores:** list an org's Snyk Code ignore policies and copy them to another org.

@@ -65,8 +65,11 @@ Org scope.
 | Tool | What it does |
 |------|--------------|
 | `snyk_clone_integration` ✎ | Clone an integration, with credentials, to another org (not CLI). |
+| `snyk_list_integration_settings` | Show one integration type's pull request check settings in several orgs, plus its automatic PR settings. |
 | `snyk_list_integrations` | List an org's integrations. |
+| `snyk_update_integration_settings` ✎ | Set one integration type's pull request check settings (Open Source, Code, Secrets) in many orgs. |
 
+- Projects imported from a repo inherit their pull request checks from the integration, so `snyk_update_integration_settings` is how to change PR checks for many projects at once. It changes only the settings you pass, skips orgs already set or without that integration, and reads each org's settings back after applying. It doesn't change the automatic fix and upgrade PR settings, since those make Snyk open pull requests.
 - If the target org already has an integration of that type, the clone writes into it, replacing its settings and credentials, rather than adding a second one. The dry run warns when that will happen.
 
 ## [Inventory Assets](https://docs.snyk.io/developer-tools/snyk-api/reference/inventory-assets)
@@ -125,7 +128,7 @@ Snyk Code consistent ignores. Org scope; the org needs "Ignores across the repos
 | `snyk_remove_project_tags` ✎ | Remove tags, by key, from many projects. |
 
 - The dry runs check every project ID is in the org first, and stop if one isn't.
-- Projects imported from a repo inherit their pull request check settings from the integration (`pullRequestInheritance: "integration"`); CLI projects have none. Snyk's V1 API accepts writes to these project settings but doesn't apply them, so there's no tool to change them per project.
+- Projects imported from a repo inherit their pull request check settings from the integration (`pullRequestInheritance: "integration"`); CLI projects have none. Snyk's V1 API accepts writes to these project settings but doesn't apply them, so change them on the integration with `snyk_update_integration_settings`.
 - Project tags are not asset labels.
 - `snyk_move_projects` needs group admin. Moving across groups needs a personal API key, not a service account key.
 
