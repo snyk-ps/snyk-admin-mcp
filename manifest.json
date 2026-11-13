@@ -2,9 +2,9 @@
   "manifest_version": "0.3",
   "name": "snyk-admin-mcp",
   "display_name": "Snyk Admin",
-  "version": "2.0.0",
-  "description": "Snyk group admin tools: org settings, projects, members, assets, collections, ignore policies, and audit logs. Every change is previewed first.",
-  "long_description": "Manage Snyk orgs and projects from Claude: copy org settings between orgs, clone integrations, create orgs, tag, classify, and move projects, label assets, manage collections and Snyk Code ignore policies, list members and service accounts, and search audit logs. Every tool that changes Snyk first returns a dry-run plan, and applies only that plan, after you confirm it. See TOOLS.md for every tool.",
+  "version": "2.1.0",
+  "description": "Snyk group admin tools: org and integration settings, projects, members and access, assets, collections, ignore policies, and audit logs. Every change is previewed first.",
+  "long_description": "Manage Snyk orgs and projects from Claude: copy org settings between orgs, clone integrations, set integrations' pull request checks across orgs, create orgs, tag, classify, and move projects, label assets, manage collections and Snyk Code ignore policies, review who has access (members, pending invites, service accounts, installed apps), and search audit logs. Every tool that changes Snyk first returns a dry-run plan, and applies only that plan, after you confirm it. See TOOLS.md for every tool.",
   "author": {
     "name": "Snyk Ltd.",
     "url": "https://snyk.io"
