@@ -229,9 +229,48 @@ export const createOrganization = defineTool({
   },
 });
 
+/** An org's IaC custom rules in words: "inherits from its group (off, tag latest)", "own settings (on, registry …)", "not set". */
+function describeIacRules(r: rest.IacCustomRules | null): string {
+  if (!r) return "unknown";
+  const parts = [
+    r.is_enabled === true ? "on" : r.is_enabled === false ? "off" : "",
+    r.oci_registry_url ? `registry ${r.oci_registry_url}` : "",
+    r.oci_registry_tag ? `tag ${r.oci_registry_tag}` : "",
+  ].filter(Boolean).join(", ");
+  if (r.inherit_from_parent === "group") return `inherits from its group${parts ? ` (${parts})` : ""}`;
+  return parts ? `own settings (${parts})` : "not set";
+}
+
+/**
+ * What to send so the target org's IaC custom rules match the source's, or why nothing is sent.
+ * A source that inherits from its group makes the target inherit from *its* group; a source with
+ * its own registry, tag, or on/off sends just those, which stops the target inheriting.
+ * `targetGroupHasSettings` is null when it wasn't or couldn't be checked.
+ */
+export function planIacCopy(
+  source: rest.IacCustomRules,
+  target: rest.IacCustomRules | null,
+  targetGroupHasSettings: boolean | null
+): { apply: rest.IacCustomRules | null; note?: string } {
+  if (source.inherit_from_parent === "group") {
+    if (target?.inherit_from_parent === "group") return { apply: null, note: "no change (both orgs inherit their group's)" };
+    // Snyk rejects this PATCH with a 400 when the group has nothing to inherit (live-checked).
+    if (targetGroupHasSettings === false) return { apply: null, note: "not copied: the source org inherits its group's, but the target org's group has none to inherit" };
+    return { apply: { inherit_from_parent: "group" } };
+  }
+  const own: rest.IacCustomRules = {};
+  if (source.is_enabled !== undefined) own.is_enabled = source.is_enabled;
+  if (source.oci_registry_url !== undefined) own.oci_registry_url = source.oci_registry_url;
+  if (source.oci_registry_tag !== undefined) own.oci_registry_tag = source.oci_registry_tag;
+  if (Object.keys(own).length === 0) return { apply: null, note: "not copied: nothing set at the source org" };
+  const same = target !== null && target.inherit_from_parent !== "group" && (Object.keys(own) as (keyof rest.IacCustomRules)[]).every((k) => target[k] === own[k]);
+  if (same) return { apply: null, note: "no change (the target org already has the same settings)" };
+  return { apply: own };
+}
+
 export const copyOrgSettings = defineTool({
   name: "snyk_copy_org_settings",
-  description: "Copy organization settings from a source org to a target org: V1 org settings (e.g. requestAccess) and default notification settings via Snyk's V1 API, plus SAST settings (whether Snyk Code is on), Open Source language settings, and Secrets settings (all via the REST API; Secrets settings is Early Access/beta). Always run with dry_run=true first to get a plan and approval_token, then run with dry_run=false and approval_token to apply.",
+  description: "Copy organization settings from a source org to a target org: V1 org settings (e.g. requestAccess) and default notification settings via Snyk's V1 API, plus SAST settings (whether Snyk Code is on), Open Source language settings, Secrets settings, and IaC settings (the custom rules bundle, or inheriting it from the group), all via the REST API; Secrets settings is Early Access/beta. Always run with dry_run=true first to get a plan and approval_token, then run with dry_run=false and approval_token to apply.",
   schema: CopySettingsArgsSchema,
   annotations: DESTRUCTIVE,
   handler: async (parsed, config) => {
@@ -247,10 +286,13 @@ export const copyOrgSettings = defineTool({
       secrets_settings_to_apply: rest.SecretsSettingsResource | null;
       secrets_settings_unavailable?: string;
       /** The target's current on/off states, for the dry run's before → after lines (null = couldn't read). */
-      target_current: { sast_enabled: boolean | null; secrets_enabled: boolean | null; notification_settings: v1.NotificationSettings | null };
+      target_current: { sast_enabled: boolean | null; secrets_enabled: boolean | null; notification_settings: v1.NotificationSettings | null; iac_custom_rules: rest.IacCustomRules | null };
       /** The source org's default notification settings (V1); null when they couldn't be read. */
       notification_settings_to_apply: v1.NotificationSettings | null;
       notification_settings_unavailable?: string;
+      /** The IaC custom rules fields to send; null when nothing is sent, with the reason in iac_note. */
+      iac_custom_rules_to_apply: rest.IacCustomRules | null;
+      iac_note?: string;
     };
     return await runMutationTool<CopySettingsPlan>({
       action: "copy_org_settings",
@@ -264,7 +306,7 @@ export const copyOrgSettings = defineTool({
         // The target's current state is read only to show what changes (e.g. Secrets on → off);
         // a read failure just leaves that line as "unknown".
         const soft = <T,>(p: Promise<T>) => p.then((v) => v, () => null);
-        const [settings_to_apply, sast_settings_to_apply, languageSettings, secrets, targetSast, targetSecrets, notifications, targetNotifications] = await Promise.all([
+        const [settings_to_apply, sast_settings_to_apply, languageSettings, secrets, targetSast, targetSecrets, notifications, targetNotifications, sourceIac, targetIac] = await Promise.all([
           v1.getOrgSettings(config, safeSourceOrgId),
           rest.getSastSettings(config, safeSourceOrgId),
           rest.getLanguageSettings(config, safeSourceOrgId),
@@ -282,7 +324,24 @@ export const copyOrgSettings = defineTool({
             (err: unknown) => ({ settings: null, error: err instanceof Error ? err.message : String(err) })
           ),
           soft(v1.getNotificationSettings(config, safeTargetOrgId)),
+          // IaC custom rules are an Enterprise feature; a source whose IaC settings can't be read
+          // skips this part rather than blocking the rest, like Secrets.
+          rest.getIacSettings(config, safeSourceOrgId).then(
+            (s) => ({ rules: rest.pickIacCustomRules(s.attributes.custom_rules), error: undefined }),
+            (err: unknown) => ({ rules: null, error: err instanceof Error ? err.message : String(err) })
+          ),
+          soft(rest.getIacSettings(config, safeTargetOrgId).then((s) => rest.pickIacCustomRules(s.attributes.custom_rules))),
         ]);
+        let iac: { apply: rest.IacCustomRules | null; note?: string };
+        if (!sourceIac.rules) {
+          iac = { apply: null, note: `not copied: couldn't read the source org's IaC settings (${sourceIac.error})` };
+        } else {
+          // Only needed when the target would be switched to inheriting: is there anything to inherit?
+          const needsGroup = sourceIac.rules.inherit_from_parent === "group" && targetIac?.inherit_from_parent !== "group";
+          const targetGroupId = needsGroup ? await rest.getOrgGroupId(config, safeTargetOrgId) : null;
+          const targetGroupHasSettings = targetGroupId ? await rest.getGroupIacSettings(config, targetGroupId).then((s) => s !== null, () => null) : null;
+          iac = planIacCopy(sourceIac.rules, targetIac, targetGroupHasSettings);
+        }
         return {
           source_org_id: parsed.source_org_id,
           target_org_id: parsed.target_org_id,
@@ -295,9 +354,12 @@ export const copyOrgSettings = defineTool({
             sast_enabled: typeof targetSast?.attributes.sast_enabled === "boolean" ? targetSast.attributes.sast_enabled : null,
             secrets_enabled: typeof targetSecrets?.attributes.secrets_enabled === "boolean" ? targetSecrets.attributes.secrets_enabled : null,
             notification_settings: targetNotifications,
+            iac_custom_rules: targetIac,
           },
           notification_settings_to_apply: notifications.settings,
           ...(notifications.error !== undefined ? { notification_settings_unavailable: notifications.error } : {}),
+          iac_custom_rules_to_apply: iac.apply,
+          ...(iac.note !== undefined ? { iac_note: iac.note } : {}),
         };
       },
       describeDryRun: async (data) => {
@@ -342,13 +404,23 @@ export const copyOrgSettings = defineTool({
                 : "- Notification settings: (no change)"
           );
         }
+        const iacTo = data.iac_custom_rules_to_apply;
+        if (iacTo) {
+          const iacFrom = data.target_current.iac_custom_rules;
+          const iacOff = iacFrom?.is_enabled === true && iacTo.is_enabled === false ? ` — this turns IaC custom rules OFF in ${targetLabel}` : "";
+          const iacKept = iacTo.inherit_from_parent ? "" : " (anything the source doesn't set stays as it is)";
+          changes.push(`- IaC custom rules: ${describeIacRules(iacFrom)} → ${describeIacRules(iacTo)}${iacKept}${iacOff}`);
+        } else {
+          changes.push(`- IaC custom rules: ${data.iac_note}`);
+        }
         const turnsOff = changes.some((l) => l!.includes(" OFF in "));
         const changeBlock = `\n\nIn ${targetLabel}:\n${changes.join("\n")}${turnsOff ? "\n\nWarning: this copy turns a product off in the target org, so it stops scanning with it." : ""}`;
         const notificationsSummary = data.notification_settings_to_apply ? " + notification settings" : "";
         const notificationsWarning = data.notification_settings_to_apply
           ? ""
           : `\n\nNotification settings will NOT be copied: they couldn't be read from the source org. Error: ${data.notification_settings_unavailable}`;
-        return `Dry run – copy settings from ${sourceLabel} to ${targetLabel} (V1 org settings + SAST settings + ${languageSummary}${emptyNote}${secretsSummary}${notificationsSummary}).${changeBlock}${secretsWarning}${notificationsWarning}\n\nPlan:\n${JSON.stringify(data, null, 2)}\n\nNote: only requestAccess and similar editable fields are copied from V1 org settings; SAST, Open Source language, and Secrets settings are copied via the REST API (Secrets settings is Early Access/beta).`;
+        const iacSummary = data.iac_custom_rules_to_apply ? " + IaC custom rules" : "";
+        return `Dry run – copy settings from ${sourceLabel} to ${targetLabel} (V1 org settings + SAST settings + ${languageSummary}${emptyNote}${secretsSummary}${notificationsSummary}${iacSummary}).${changeBlock}${secretsWarning}${notificationsWarning}\n\nPlan:\n${JSON.stringify(data, null, 2)}\n\nNote: only requestAccess and similar editable fields are copied from V1 org settings; SAST, Open Source language, Secrets, and IaC settings are copied via the REST API (Secrets settings is Early Access/beta).`;
       },
       apply: async (data) => {
         const safeTargetOrgId = sanitizePathSegment(data.target_org_id, "target_org_id");
@@ -390,6 +462,12 @@ export const copyOrgSettings = defineTool({
             note: `not copied: couldn't read the source org's Secrets settings (${data.secrets_settings_unavailable})`,
           });
         }
+        const iacRules = data.iac_custom_rules_to_apply;
+        if (iacRules) {
+          await record("IaC settings", () => rest.updateIacCustomRules(config, safeTargetOrgId, iacRules));
+        } else {
+          steps.push({ step: "IaC settings", ok: true, skipped: true, note: data.iac_note });
+        }
         await Promise.all(
           Object.entries(data.language_settings_to_apply).map(([language, packageManagers]) => {
             // `package_managers` is a oneOf across the six per-language schemas, and an empty
@@ -416,12 +494,13 @@ export const copyOrgSettings = defineTool({
         const applied = steps.length - failed.length - skipped.length;
         const targetLabel = await formatOrgId(config, data.target_org_id);
         const secretsSkipped = !secretsSettings;
-        const languageSkips = skipped.length - (secretsSkipped ? 1 : 0) - (notificationSettings ? 0 : 1);
+        const languageSkips = skipped.filter((s) => s.step.startsWith("language settings")).length;
         const skippedNote = languageSkips ? ` (${languageSkips} skipped — nothing configured at the source)` : "";
-        const secretsNote = secretsSkipped ? " Secrets settings were not copied: they couldn't be read from the source org (see steps)." : "";
+        const skipNotes = (secretsSkipped ? " Secrets settings were not copied: they couldn't be read from the source org (see steps)." : "")
+          + (iacRules ? "" : ` IaC custom rules: ${data.iac_note}.`);
         const summary = failed.length === 0
-          ? `Copied ${applied} setting group(s) to ${targetLabel}${skippedNote}.${secretsNote}`
-          : `Copied ${applied} of ${steps.length - skipped.length} setting group(s) to ${targetLabel}${skippedNote}; ${failed.length} failed — the target org is partially configured.${secretsNote}`;
+          ? `Copied ${applied} setting group(s) to ${targetLabel}${skippedNote}.${skipNotes}`
+          : `Copied ${applied} of ${steps.length - skipped.length} setting group(s) to ${targetLabel}${skippedNote}; ${failed.length} failed — the target org is partially configured.${skipNotes}`;
         return `${summary}\n\nSteps:\n${JSON.stringify(steps, null, 2)}`;
       },
     });
