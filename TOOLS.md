@@ -60,6 +60,16 @@ Org scope.
 - The API silently ignores unknown project IDs and projects from other orgs, so the tools re-read the collection after a change and report `not_added` / `not_removed`.
 - Collection project lists have IDs and issue counts but no names; use `snyk_list_projects` for names. A collection ID that doesn't exist is an error, not an empty list.
 
+## [Groups](https://docs.snyk.io/developer-tools/snyk-api/reference/groups)
+
+| Tool | What it does |
+|------|--------------|
+| `snyk_list_user_access` | Show everywhere one person has access in a group: their group role and every org membership, with role and date added. |
+
+- Look the person up by `user_id` or `email`. An email is an exact match, ignoring case: the tool checks the group's memberships, then its orgs' members, up to 500 orgs.
+- Org names come from each org, since Snyk's membership list gives the org's slug instead.
+- Read-only. This server doesn't wrap the endpoints that add, change, or remove memberships.
+
 ## [Integrations (v1)](https://docs.snyk.io/developer-tools/snyk-api/reference/integrations-v1)
 
 | Tool | What it does |
@@ -86,21 +96,31 @@ Early Access. Org or group scope; repositories, images, SBOMs.
 - Use these tools for org scope, RSQL filters, counts, and labelling many assets in fewer requests. Their IDs don't work with the Asset tools; `snyk_update_inventory_assets` rejects Asset IDs, naming the tool that takes them.
 - Updates are all-or-nothing per 100-asset request. The dry run checks every ID exists first, and the tool only adds or removes labels and tags, never replaces them all.
 
+## [Invites](https://docs.snyk.io/developer-tools/snyk-api/reference/invites)
+
+| Tool | What it does |
+|------|--------------|
+| `snyk_list_invites` | List invites to orgs that haven't been accepted: email, the role they'll get, and the org. Up to 25 orgs by ID, or a group's orgs 100 per call. |
+
+- An org whose invites can't be read is listed separately; the others are still checked.
+- Read-only. This server doesn't wrap the endpoints that send or revoke invites.
+
 ## [Organizations (v1)](https://docs.snyk.io/developer-tools/snyk-api/reference/organizations-v1)
 
 | Tool | What it does |
 |------|--------------|
-| `snyk_copy_org_settings` ✎ | Copy V1, notification, SAST, Open Source language, and Secrets settings to another org. |
+| `snyk_copy_org_settings` ✎ | Copy V1, notification, SAST, Open Source language, Secrets, and IaC settings to another org. |
 | `snyk_create_organization` ✎ | Create an org, optionally copying settings from a template org. |
 
 - The `snyk_copy_org_settings` dry run shows the target's Snyk Code and Snyk Secrets state before and after, and warns if the copy would turn either one off. It also lists each notification setting that would change (the org's default alerts, such as the severity that triggers new-issue emails).
-- `snyk_copy_org_settings` also uses the [SastSettings](https://docs.snyk.io/developer-tools/snyk-api/reference/sastsettings), [LanguagesSettings](https://docs.snyk.io/developer-tools/snyk-api/reference/languagessettings), and [SecretsSettings](https://docs.snyk.io/developer-tools/snyk-api/reference/secretssettings) APIs. It applies the four parts separately and reports each one. For V1 settings it copies only the fields the API lets you edit (e.g. `requestAccess`). If the source org's Secrets settings can't be read (usually because it has no Snyk Secrets), that part is skipped.
+- `snyk_copy_org_settings` also uses the [SastSettings](https://docs.snyk.io/developer-tools/snyk-api/reference/sastsettings), [LanguagesSettings](https://docs.snyk.io/developer-tools/snyk-api/reference/languagessettings), [SecretsSettings](https://docs.snyk.io/developer-tools/snyk-api/reference/secretssettings), and [IacSettings](https://docs.snyk.io/developer-tools/snyk-api/reference/iacsettings) APIs. It applies each part separately and reports each one. For V1 settings it copies only the fields the API lets you edit (e.g. `requestAccess`). If the source org's Secrets or IaC settings can't be read (usually because it doesn't have that product), that part is skipped.
+- IaC settings are the custom rules bundle `snyk iac test` pulls. If the source org inherits them from its group, the target is set to inherit from its own group, which may use a different bundle; if that group has none, this part is skipped. Otherwise the source's own registry, tag, and on/off are copied, so the target stops inheriting. The dry run shows the target's IaC settings before and after.
 
 ## [Orgs](https://docs.snyk.io/developer-tools/snyk-api/reference/orgs)
 
 | Tool | What it does |
 |------|--------------|
-| `snyk_list_members` | List an org's or group's members and roles; filter by email, username, or role. |
+| `snyk_list_members` | List an org's or group's members and roles; filter by email, username, or role. For one person across every org in a group, use `snyk_list_user_access`. |
 | `snyk_list_orgs` | List orgs; filter by group, name, slug, personal. |
 
 - `snyk_list_members` with `group_id` uses the [Groups](https://docs.snyk.io/developer-tools/snyk-api/reference/groups) memberships endpoint. It lists group-level memberships (such as Group Admin), not each org's members.

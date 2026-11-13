@@ -326,6 +326,72 @@ export async function listMemberships(
   return res.json() as Promise<ListMembershipsResponse>;
 }
 
+/**
+ * One of a user's org memberships within a group. `org.data.attributes.name` is the org's slug
+ * on the live API (e.g. "jira-cloud-integration" for an org named "Jira Cloud integration"),
+ * not its display name, despite the spec calling it the name.
+ */
+export type GroupUserOrgMembership = {
+  id: string;
+  attributes?: { created_at?: string };
+  relationships?: {
+    org?: { data?: { id?: string; attributes?: { name?: string } } };
+    role?: { data?: { id?: string; attributes?: { name?: string } } };
+    user?: { data?: { id?: string; attributes?: { name?: string; email?: string; username?: string } } };
+  };
+};
+export type ListGroupUserOrgMembershipsResponse = { data: GroupUserOrgMembership[]; links?: PageLinks; meta?: { org_membership_count?: number } };
+
+/**
+ * Every org membership one user has in a group. GET /groups/{group_id}/org_memberships (GA).
+ * `user_id` is required (400 without it); a user the group doesn't know is a 404. `org_name`
+ * matches part of the org's name and `role_name` the role's, both ignoring case (live-checked).
+ * `meta.org_membership_count` is the total across all pages.
+ */
+export async function listGroupUserOrgMemberships(
+  config: SnykApiConfig,
+  groupId: string,
+  userId: string,
+  opts: { org_name?: string; role_name?: string; limit?: number; starting_after?: string } = {}
+): Promise<ListGroupUserOrgMembershipsResponse> {
+  const safeGroupId = sanitizePathSegment(groupId, "group_id");
+  const qs = buildQuery({
+    user_id: userId,
+    org_name: opts.org_name,
+    role_name: opts.role_name,
+    limit: opts.limit,
+    starting_after: opts.starting_after,
+  });
+  const res = await restFetch(config, `/groups/${safeGroupId}/org_memberships${qs}`);
+  if (!res.ok) throw new Error(`REST listGroupUserOrgMemberships failed: ${res.status} ${await res.text()}`);
+  return res.json() as Promise<ListGroupUserOrgMembershipsResponse>;
+}
+
+// --- Invites (GA): people invited to an org who haven't joined yet ---
+
+/** One invite. `is_active` is true while it's waiting to be accepted; false once accepted or revoked. */
+export type OrgInvite = { id: string; attributes?: { email?: string; is_active?: boolean; role?: string } };
+
+/** Safety cap on invite pages read per org (100 per page). */
+const MAX_INVITE_PAGES = 10;
+
+/** All of an org's invites, following cursors. GET /orgs/{org_id}/invites (GA). */
+export async function listAllOrgInvites(config: SnykApiConfig, orgId: string): Promise<{ invites: OrgInvite[]; truncated: boolean }> {
+  const safeOrgId = sanitizePathSegment(orgId, "org_id");
+  const invites: OrgInvite[] = [];
+  let cursor: string | undefined;
+  for (let page = 0; page < MAX_INVITE_PAGES; page++) {
+    const res = await restFetch(config, `/orgs/${safeOrgId}/invites${buildQuery({ limit: 100, starting_after: cursor })}`);
+    if (!res.ok) throw new Error(`REST listOrgInvites failed: ${res.status} ${await res.text()}`);
+    const body = (await res.json()) as { data?: OrgInvite[]; links?: PageLinks };
+    invites.push(...(body.data ?? []));
+    const next = cursorFromLink(body.links?.next, "starting_after");
+    if (!next) return { invites, truncated: false };
+    cursor = next;
+  }
+  return { invites, truncated: true };
+}
+
 /** One audit log entry, per the OpenAPI spec's `AuditLogSearch.items` shape. */
 export type AuditLogEntry = {
   created: string;
@@ -559,6 +625,72 @@ export async function updateSecretsSettings(
   });
   if (!res.ok) throw new Error(`REST updateSecretsSettings failed: ${res.status} ${await res.text()}`);
   const body = (await res.json()) as { data: SecretsSettingsResource };
+  return body.data;
+}
+
+/**
+ * IaC custom rules settings (GA): which OCI registry bundle of custom rules `snyk iac test`
+ * pulls, and whether that's on. Live behaviour the copy relies on (2026-11-13):
+ * - An org whose settings were never touched returns `custom_rules: {}`. Newer orgs return
+ *   `{ inherit_from_parent: "group", is_enabled: false, oci_registry_tag: "latest" }`.
+ * - With `inherit_from_parent: "group"`, the other fields are the group's values, not the org's.
+ * - A group with no IaC settings answers its GET with 404 "Group IaC Settings not found", and
+ *   PATCHing an org in it to inherit answers 400 "The organization's group does not have any
+ *   settings to inherit."
+ * Per Snyk's docs, PATCHing an org with its own registry/tag/is_enabled stops it inheriting, and
+ * PATCHing `{ inherit_from_parent: "group" }` makes it inherit again.
+ */
+export type IacCustomRules = { inherit_from_parent?: "group"; is_enabled?: boolean; oci_registry_url?: string; oci_registry_tag?: string };
+export type IacSettingsResource = {
+  id?: string;
+  type: string;
+  attributes: { custom_rules?: IacCustomRules & Record<string, unknown>; parents?: Record<string, unknown>; updated?: string };
+};
+
+/** The four writable custom rules fields of a settings resource, and nothing else. */
+export function pickIacCustomRules(rules: Record<string, unknown> | undefined): IacCustomRules {
+  const out: IacCustomRules = {};
+  if (rules?.inherit_from_parent === "group") out.inherit_from_parent = "group";
+  if (typeof rules?.is_enabled === "boolean") out.is_enabled = rules.is_enabled;
+  if (typeof rules?.oci_registry_url === "string") out.oci_registry_url = rules.oci_registry_url;
+  if (typeof rules?.oci_registry_tag === "string") out.oci_registry_tag = rules.oci_registry_tag;
+  return out;
+}
+
+/** Get an org's IaC settings. GET /orgs/{org_id}/settings/iac. */
+export async function getIacSettings(config: SnykApiConfig, orgId: string): Promise<IacSettingsResource> {
+  const safeOrgId = sanitizePathSegment(orgId, "org_id");
+  const res = await restFetch(config, `/orgs/${safeOrgId}/settings/iac`);
+  if (!res.ok) throw new Error(`REST getIacSettings failed: ${res.status} ${await res.text()}`);
+  const body = (await res.json()) as { data: IacSettingsResource };
+  return body.data;
+}
+
+/** Get a group's IaC settings, or null when the group has none (404). GET /groups/{group_id}/settings/iac. */
+export async function getGroupIacSettings(config: SnykApiConfig, groupId: string): Promise<IacSettingsResource | null> {
+  const safeGroupId = sanitizePathSegment(groupId, "group_id");
+  const res = await restFetch(config, `/groups/${safeGroupId}/settings/iac`);
+  if (res.status === 404) return null;
+  if (!res.ok) throw new Error(`REST getGroupIacSettings failed: ${res.status} ${await res.text()}`);
+  const body = (await res.json()) as { data: IacSettingsResource };
+  return body.data;
+}
+
+/**
+ * Update an org's IaC custom rules. PATCH /orgs/{org_id}/settings/iac. Only the four writable
+ * fields are sent, rebuilt from `rules` rather than echoing a GET (which carries `parents` and
+ * `updated`). The body has no `id`: the spec's PATCH schema has none, unlike SAST's.
+ */
+export async function updateIacCustomRules(config: SnykApiConfig, orgId: string, rules: IacCustomRules): Promise<IacSettingsResource> {
+  const safeOrgId = sanitizePathSegment(orgId, "org_id");
+  const customRules = pickIacCustomRules(rules);
+  if (Object.keys(customRules).length === 0) throw new Error("Cannot update IaC settings: no custom rules fields to set");
+  const res = await restFetch(config, `/orgs/${safeOrgId}/settings/iac`, {
+    method: "PATCH",
+    body: JSON.stringify({ data: { type: "iac_settings", attributes: { custom_rules: customRules } } }),
+  });
+  if (!res.ok) throw new Error(`REST updateIacCustomRules failed: ${res.status} ${await res.text()}`);
+  const body = (await res.json()) as { data: IacSettingsResource };
   return body.data;
 }
 

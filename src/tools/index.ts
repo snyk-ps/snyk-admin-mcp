@@ -14,7 +14,7 @@ import { type Tool, toInputSchema } from "./types.js";
 import { cloneIntegration, copyOrgSettings, createOrganization, listIntegrations, listOrgs, listProjects } from "./orgs.js";
 import { addProjectTags, listProjectSettings, moveProjects, removeProjectTags, updateProjects } from "./projects.js";
 import { listAppInstalls, listBrokerConnections, listServiceAccounts } from "./security.js";
-import { listMembers } from "./members.js";
+import { listInvites, listMembers, listUserAccess } from "./members.js";
 import { listIntegrationSettings, updateIntegrationSettings } from "./integrations.js";
 import { copyIgnorePolicies, listIgnorePolicies } from "./policies.js";
 import { searchAuditLogs } from "./audit.js";
@@ -37,6 +37,8 @@ export const TOOLS: readonly Tool[] = [
   listProjects,
   listProjectSettings,
   listMembers,
+  listUserAccess,
+  listInvites,
   listServiceAccounts,
   listAppInstalls,
   listBrokerConnections,
